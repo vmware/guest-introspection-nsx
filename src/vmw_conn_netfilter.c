@@ -52,7 +52,7 @@
 #define VNET_BUFSIZE 1024
 
 /* Mark on packets to be put by our daemon after processing. */
-#define VMW_NFQ_PKT_MARK  0x1
+#define VMW_NFQ_PKT_MARK  0x3
 
 /* Loop back or local address and mask */
 #define VMW_LOOPBACK_ADDRESS "127.0.0.1"
@@ -103,6 +103,54 @@ extern int
 vmw_wait_for_event(int, fd_set *, uint8_t);
 extern void
 vmw_notify_exit();
+
+/*
+ * Check if the mark provided by client is in use already.
+ * return TRUE if the mark is unused and FALSE otherwise.
+ *
+ */
+bool
+vmw_is_mark_unused(int mark)
+{
+    int i;
+    bool ret = TRUE;
+    if (VMW_NFQ_PKT_MARK == mark) {
+      ret = FALSE;
+      goto exit;
+    }
+    for (i = 0; i < MAX_CLIENTS; i++) {
+      pthread_mutex_lock(&g_client_ctx[i].client_sock_lock);
+      if (g_client_ctx[i].client_sockfd > 0 &&
+         g_client_ctx[i].pkthash_cleanup_wait) {
+         if (g_client_ctx[i].client_mark == mark) {
+         ret = FALSE;
+         break;
+      }
+    }
+    pthread_mutex_unlock(&g_client_ctx[i].client_sock_lock);
+   }
+
+exit:
+   return ret;
+}
+
+/*
+ * Preserve the existing mark of packet and append it with new mark
+ */
+uint32_t
+update_packet_mark(struct nfq_data *nfad,
+                   struct vmw_client_scope *client_ptr)
+{
+   uint32_t current_mark = nfq_get_nfmark(nfad);
+   uint32_t packet_mark ;
+
+   if (client_ptr) {
+      packet_mark = current_mark | g_client_ctx->client_mark;
+   } else {
+      packet_mark = current_mark;
+   }
+   return packet_mark;
+}
 
 /* Log ipv4 address */
 void
@@ -220,7 +268,7 @@ vmw_queued_pkthash_cleanup(struct vmw_net_session *sess,
       pthread_mutex_lock(&sess->queue_lock);
 
       /*
-       * Issue NF_ACCEPT verdict so that next rule in the chain can be applied
+       * Issue NF_REPEAT verdict so that next rule in the chain can be applied
        * to the packet.
        */
       nfq_set_verdict2(sess->queue_ctx.qhandle,
@@ -245,6 +293,7 @@ vmw_client_msg_recv(void *arg)
    int sd, max_sd, i, activity, ret;
    uint32_t event_id;
    uint8_t new_client_connreq = 1;
+   vmw_verdict client_verdict = { 0 };
 
    while(1) {
       if (ATOMIC_OR(&g_need_to_quit, 0)) {
@@ -279,7 +328,7 @@ vmw_client_msg_recv(void *arg)
       for (i = 0; i < MAX_CLIENTS; i++)  {
          sd = g_client_ctx[i].client_sockfd;
          if (FD_ISSET(sd , &readfds)) {
-            ret = recv(sd, (void *)&event_id, sizeof(event_id), 0);
+            ret = recv(sd, (void *)&client_verdict, sizeof(client_verdict), 0);
             if (!ret) {
                /*
                 * Client got disconneted, so release packets queued in netfilter
@@ -298,18 +347,21 @@ vmw_client_msg_recv(void *arg)
                continue;
             }
 
-            /* event_id is zero for conntrack related event */
-            if (!event_id) {
+            if (!client_verdict.packetId) {
                continue;
             }
 
+            if (client_verdict.verdict != NF_DROP) {
+               client_verdict.verdict = NF_REPEAT;
+            }
+
             g_hash_table_remove(g_client_ctx[i].queued_pkthash,
-                                GUINT_TO_POINTER(event_id));
+                                GUINT_TO_POINTER(client_verdict.packetId));
             pthread_mutex_lock(&sess->queue_lock);
             nfq_set_verdict2(sess->queue_ctx.qhandle,
-                            event_id,
-                            NF_REPEAT,
-                            VMW_NFQ_PKT_MARK,
+                            client_verdict.packetId,
+                            client_verdict.verdict,
+                            g_client_ctx[i].client_mark,
                             0,
                             NULL);
             pthread_mutex_unlock(&sess->queue_lock);
@@ -597,6 +649,7 @@ vmw_net_conntrack_init(void *arg)
    }
 
    nfct_filter_add_attr_u32(filter, NFCT_FILTER_L4PROTO, IPPROTO_TCP);
+   nfct_filter_add_attr_u32(filter, NFCT_FILTER_L4PROTO, IPPROTO_UDP);
 
    /* Instruct conntrack to deliver IPv4 events in host-byte order */
    struct nfct_filter_ipv4 filter_ipv4 = {
@@ -675,6 +728,7 @@ vmw_net_queue_callback(struct nfq_q_handle *qh,
    struct iphdr *ipinfo = NULL;
    struct ip6_hdr *ip6info = NULL;
    struct tcphdr *tcp_info = NULL;
+   struct udphdr *udp_info = NULL;
    struct vmw_conn_identity_data *conn_data = NULL;
    struct vmw_net_session *sess = (struct vmw_net_session*)arg;
    int ret = -1;
@@ -682,6 +736,7 @@ vmw_net_queue_callback(struct nfq_q_handle *qh,
    enum vmw_conn_event_type event_type = 0;
    unsigned char *data = NULL;
    uint32_t event_id;
+   uint32_t packet_mark;
 
    sess = vmw_net_sess_handle;
    if (!nfa|| !sess) {
@@ -719,58 +774,71 @@ vmw_net_queue_callback(struct nfq_q_handle *qh,
    ipinfo = (struct iphdr *)data;
 
    if (IPVERSION == ipinfo->version) {
-      if (IPPROTO_TCP == ipinfo->protocol) {
-         conn_data->src.ss_family = AF_INET;
-         conn_data->dst.ss_family = AF_INET;
-         struct sockaddr_in *src = (struct sockaddr_in *)&conn_data->src;
-         struct sockaddr_in *dst = (struct sockaddr_in *)&conn_data->dst;
-         src->sin_addr.s_addr = ipinfo->saddr;
-         dst->sin_addr.s_addr = ipinfo->daddr;
+      conn_data->src.ss_family = AF_INET;
+      conn_data->dst.ss_family = AF_INET;
+      struct sockaddr_in *src = (struct sockaddr_in *)&conn_data->src;
+      struct sockaddr_in *dst = (struct sockaddr_in *)&conn_data->dst;
+      src->sin_addr.s_addr = ipinfo->saddr;
+      dst->sin_addr.s_addr = ipinfo->daddr;
 
+      if (IPPROTO_TCP == ipinfo->protocol) {
          /* Get the tcphdr from the payload */
          tcp_info = (struct tcphdr *)(data + sizeof(*ipinfo));
          src->sin_port = ntohs(tcp_info->source);
          dst->sin_port = ntohs(tcp_info->dest);
-         vmw_log_ipv4_address((struct sockaddr_in *)src);
-         vmw_log_ipv4_address((struct sockaddr_in *)dst);
-
+      } else if (IPPROTO_UDP == ipinfo->protocol) {
+         /* Get the tcphdr from the payload */
+         udp_info = (struct udphdr *)(data + sizeof(*ipinfo));
+         src->sin_port = ntohs(udp_info->source);
+         dst->sin_port = ntohs(udp_info->dest);
       } else {
          INFO("Non tcp/ip traffic: %d, id=%u", ipinfo->protocol, event_id);
          ret = -1;
          goto exit;
       }
+      conn_data->protocol = ipinfo->protocol;
+      vmw_log_ipv4_address((struct sockaddr_in *)src);
+      vmw_log_ipv4_address((struct sockaddr_in *)dst);
    } else {
       ip6info = (struct ip6_hdr *)data;
-      if (IPPROTO_TCP == ip6info->ip6_nxt) {
-         conn_data->src.ss_family = AF_INET6;
-         conn_data->dst.ss_family = AF_INET6;
-         struct sockaddr_in6 *src6 = (struct sockaddr_in6 *)&(conn_data->src);
-         struct sockaddr_in6 *dst6 = (struct sockaddr_in6 *)&(conn_data->dst);
+      conn_data->src.ss_family = AF_INET6;
+      conn_data->dst.ss_family = AF_INET6;
+      struct sockaddr_in6 *src6 = (struct sockaddr_in6 *)&(conn_data->src);
+      struct sockaddr_in6 *dst6 = (struct sockaddr_in6 *)&(conn_data->dst);
 
+      if (IPPROTO_TCP == ip6info->ip6_nxt) {
          tcp_info = (struct tcphdr *)(data + sizeof(*ip6info));
          src6->sin6_port = ntohs(tcp_info->source);
          dst6->sin6_port = ntohs(tcp_info->dest);
-         memcpy(src6->sin6_addr.s6_addr,
-                ip6info->ip6_src.s6_addr, 16);
-                //sizeof(src->sin6_addr.s6_addr));
-         memcpy(dst6->sin6_addr.s6_addr,
-                ip6info->ip6_dst.s6_addr,
-                16);
 
+      } else if (IPPROTO_UDP == ip6info->ip6_nxt) {
+         udp_info = (struct udphdr *)(data + sizeof(*ip6info));
+         src6->sin6_port = ntohs(udp_info->source);
+         dst6->sin6_port = ntohs(udp_info->dest);
       } else {
          INFO("Non tcp/ipv6 traffic: %d, id=%u", ip6info->ip6_nxt, event_id);
          ret = -1;
          goto exit;
       }
+      memcpy(src6->sin6_addr.s6_addr,
+             ip6info->ip6_src.s6_addr,
+             16);
+      memcpy(dst6->sin6_addr.s6_addr,
+             ip6info->ip6_dst.s6_addr,
+             16);
+
+      conn_data->protocol = ip6info->ip6_nxt;
    }
 
    event_type = get_event_type(nfa);
 
    /* Don't add packet depicting invalid tcp state  to the thread pool queue */
-   if (!tcp_info->syn) {
-      INFO("Invalid tcp packet, ignoring packet: id=%u", event_id);
-      ret = -1;
-      goto exit;
+   if (tcp_info) {
+      if ((!tcp_info->syn) || (tcp_info->ack)) {
+         DEBUG("Invalid tcp packet, ignoring packet: id=%u", event_id);
+         ret = -1;
+         goto exit;
+      }
    }
 
    /* Don't add packet received on invalid hook to the thread pool queue */
@@ -794,6 +862,7 @@ vmw_net_queue_callback(struct nfq_q_handle *qh,
 
 exit:
    if (ret <= 0 && sess) {
+      packet_mark = update_packet_mark(nfa, g_client_ctx);
       /*
        * Re-inject the packet by providing NF_REPEAT verdict with mask bit set
        * so that the packet can be iterated through rest of the rules in the
@@ -802,7 +871,7 @@ exit:
       nfq_set_verdict2(sess->queue_ctx.qhandle,
                       event_id,
                       NF_REPEAT,
-                      VMW_NFQ_PKT_MARK,
+                      packet_mark,
                       0,
                       NULL);
    }

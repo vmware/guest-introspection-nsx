@@ -50,6 +50,7 @@
 
 extern volatile int g_vmw_init_done;
 extern void *vmw_init(void *);
+extern bool vmw_is_mark_unused(int mark);
 
 /* Global client context array */
 struct vmw_client_scope g_client_ctx[MAX_CLIENTS];
@@ -454,6 +455,8 @@ main(int argc, char **argv) {
    int sock = -1, new_socket = -1;
    uint32_t version = 1;
    uint8_t new_client_connreq = 0;
+   bool mark_unused = FALSE;
+   clientInfo cInfo = { 0 };
 
    /* Process command line options */
    if (vmw_process_option(argc, argv)) {
@@ -554,7 +557,7 @@ main(int argc, char **argv) {
          if (g_client_ctx[i].client_sockfd <= 0 &&
              !g_client_ctx[i].pkthash_cleanup_wait) {
             pthread_mutex_unlock(&g_client_ctx[i].client_sock_lock);
-            ret = recv(new_socket, (void *)&version, sizeof(version), 0);
+            ret = recv(new_socket, (void *)&cInfo, sizeof(clientInfo), 0);
             if (ret <= 0) {
                ERROR("Failed to complete connection with client socket %d, "
                      "error %s", new_socket, strerror(errno));
@@ -562,17 +565,27 @@ main(int argc, char **argv) {
                new_socket = -1;
                break;
             }
+            mark_unused = vmw_is_mark_unused(cInfo.mark);
+            if (FALSE == mark_unused) {
+               ERROR("Failed to complete connection with client socket %d, "
+                     "error %s", new_socket, strerror(errno));
+               close(new_socket);
+               break;
+            }
             /*
              * The version can be used to identify client verdict but currenty
              * it is not used.
              */
+            send(new_socket, &version, sizeof(version), 0);
+
             pthread_mutex_lock(&g_client_ctx[i].client_sock_lock);
-            g_client_ctx[i].client_version = version;
+            g_client_ctx[i].client_version = cInfo.version;
+            g_client_ctx[i].client_mark = cInfo.mark;
             g_client_ctx[i].client_sockfd = new_socket;
             pthread_mutex_unlock(&g_client_ctx[i].client_sock_lock);
             INFO("Adding client to the list of connected client as "
-                 "socket %d at index %d version %x", new_socket, i,
-                 version);
+                 "socket %d at index %d version %x mark %x", new_socket, i,
+                cInfo.version, cInfo.mark);
 
             /*
              * Send new client connection notification to vmw_client_msg_recv
