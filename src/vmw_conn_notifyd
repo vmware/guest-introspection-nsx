@@ -1,0 +1,311 @@
+#!/bin/sh
+#
+# Copyright (C) 2017 VMware, Inc. All rights reserved.
+#
+# This program is free software; you can redistribute it and/or modify it
+# under the terms of the GNU General Public License version 2 as published
+# by the Free Software Foundation (or any later at your option)
+#
+# This program is distributed in the hope that it will be useful, but
+# WITHOUT ANY WARRANTY; without even the implied warranty of MERCHANTABILITY
+# or FITNESS FOR A PARTICULAR PURPOSE. See the GNU General Public
+# License for more details.
+#
+# You should have received a copy of the GNU Lesser General Public License
+# along with this program; if not, write to the Free Software Foundation, Inc.,
+# 51 Franklin St, Fifth Floor, Boston, MA  02110-1301 USA.
+#
+
+#
+# SPDX-License-Identifier: GPL-2.0-or-later
+#
+
+#
+# Configuration required for vmw_conn_notify
+#
+
+# Basic support for IRIX style chkconfig
+# chkconfig: 235 99 01
+# description: VMware Guest Introspection Service
+# processname: vmw_conn_notifyd
+# pidfile: /var/run/vmw_conn_notify.pid
+
+### BEGIN INIT INFO
+# Provides:             vmw_conn_notifyd
+# Required-Start:       $network $remote_fs $syslog $time
+# Required-Stop:        $network $remote_fs $syslog $time
+# Default-Start:        2 3 4 5
+# Default-Stop:         0 1 6
+# Short-Description:    Network Connection Introspection Service
+# Description:          Manages the service need to run Network Connecion Introspection
+### END INIT INFO
+
+VMW_CONN_NOTIFY_NAME=vmw_conn_notify
+VMW_CONN_NOTIFY_BIN=/usr/sbin/$VMW_CONN_NOTIFY_NAME
+VMW_CONN_NOTIFY_CONFIG=/etc/vmw_conn_notify/vmw_conn_notify.cfg
+LOCK_FILE=/var/lock/subsys/vmw_conn_notifyd
+VMW_CONN_NOTIFY_STOP_TIME=2
+
+NFQUEUE_BYPASS="NFQUEUE --queue-num 0 --queue-bypass"
+TCP_PACKET_FILTER_OP="-p tcp --tcp-flags FIN,SYN,RST,ACK,PSH SYN"
+VNET_PACKET_STAMP="-m mark ! --mark 0x1/0x1"
+VNET_CHAIN=vnetchain
+
+if [ -x  '/sbin/iptables' ]; then
+   IPTABLES="/sbin/iptables"
+elif [ -x '/usr/sin/iptables' ]; then
+   IPTABLES="/usr/sbin/iptables"
+else
+   IPTABLES="iptables"
+fi
+
+if [ -x  '/sbin/ip6tables' ]; then
+   IP6TABLES="/sbin/ip6tables"
+elif [ -x '/usr/sin/ip6tables' ]; then
+   IP6TABLES="/usr/sbin/ip6tables"
+else
+   IP6TABLES="ip6tables"
+fi
+
+MODPROBE="/sbin/modprobe"
+
+# Check for missing binaries
+if [ ! -f $VMW_CONN_NOTIFY_BIN ] ; then
+   echo "$VMW_CONN_NOTIFY_BIN not installed"
+   if [ "$1" = "stop" ] ; then
+      exit 0
+   else
+      exit 5
+   fi
+fi
+
+#
+# Enable this when we have a config file
+# Check for missing config file
+[ -e $VMW_CONN_NOTIFY_CONFIG ] && . $VMW_CONN_NOTIFY_CONFIG
+
+# Determine OS type based on the functions library path
+OS=""
+if [ -f /etc/init.d/functions ] ; then
+   OS="Redhat"
+   . /etc/init.d/functions
+
+   DAEMON_COREFILE_LIMIT='ulimited'
+   alias START_DAEMON=daemon
+   alias STOP_DAEMON=killproc
+   alias STATUS=status
+   alias LOG_SUCCESS=success
+   alias LOG_FAILURE=failure
+   alias LOG_WARNING=warning
+   alias BLANK_LINE=echo
+   MODPROBE_PARAM=""
+elif [ -f /lib/lsb/init-functions ] && [ -f /etc/rc.status ] ; then
+   OS="Suse"
+   . /lib/lsb/init-functions
+
+   alias START_DAEMON=start_daemon
+   alias STOP_DAEMON=killproc
+   alias STATUS=checkproc
+   alias LOG_SUCCESS=log_success_msg
+   alias LOG_FAILURE=log_failure_msg
+   alias LOG_WARNING=log_warning_msg
+   alias BLANK_LINE='echo'
+   MODPROBE_PARAM="--allow-unsupported-modules"
+elif [ -f /lib/lsb/init-functions ] ; then
+   OS="Ubuntu"
+   . /lib/lsb/init-functions
+
+   alias START_DAEMON=start_daemon
+   alias STOP_DAEMON=killproc
+   alias STATUS=status_of_proc
+   alias LOG_SUCCESS=log_success_msg
+   alias LOG_FAILURE=log_failure_msg
+   alias LOG_WARNING=log_warning_msg
+   alias BLANK_LINE='echo'
+   MODPROBE_PARAM=""
+else
+   OS="Unsupported OS, exiting."
+   LOG_FAILURE $OS
+   exit 1
+fi
+
+# Execute the given command and bail-out on failure
+exec_or_die() {
+   status="0"
+   cmd="$@"
+   out=$($cmd 2>&1) || status="$?"
+   if [ "$status" -ne 0 ]; then
+      # Remove extra spaces if any because of indentation
+      cmd=$(echo $cmd | /bin/sed 's/[[:space:]]/ /g')
+      LOG_FAILURE "Failure in executing \"$cmd\", error code: $status, \"$out\""
+      BLANK_LINE
+      exit 4
+   fi
+}
+
+# Execute the given command and log warning message on failure
+exec_or_warn() {
+   status="0"
+   cmd="$@"
+   out=$($cmd 2>&1) || status="$?"
+   if [ "$status" -ne 0 ]; then
+      # Remove extra spaces if any because of indentation
+      cmd=$(echo $cmd | /bin/sed 's/[[:space:]]/ /g')
+      LOG_WARNING "\"$cmd\" returns with code: $status, message: \"$out\""
+      BLANK_LINE
+      return 4
+   fi
+}
+
+# Load netfilter kernel modules
+load_netfilter_modules() {
+   exec_or_die ${MODPROBE} iptable_filter
+   exec_or_die ${MODPROBE} ip6table_filter
+   exec_or_die ${MODPROBE} xt_NFQUEUE
+   exec_or_die ${MODPROBE} nf_conntrack_ipv4
+   exec_or_die ${MODPROBE} nf_conntrack_ipv6
+}
+
+add_vnetchain_filter_rules() {
+   exec_or_die "${IPTABLES} -N ${VNET_CHAIN}"
+   exec_or_die "${IP6TABLES} -N ${VNET_CHAIN}"
+
+   exec_or_die "${IPTABLES} -I INPUT ${VNET_PACKET_STAMP} \
+                ${TCP_PACKET_FILTER_OP} -j ${VNET_CHAIN}"
+   exec_or_die "${IPTABLES} -I OUTPUT ${VNET_PACKET_STAMP} \
+                ${TCP_PACKET_FILTER_OP} -j ${VNET_CHAIN}"
+   exec_or_die "${IPTABLES} -I ${VNET_CHAIN} -j ${NFQUEUE_BYPASS}"
+
+   exec_or_die "${IP6TABLES} -I INPUT ${VNET_PACKET_STAMP} \
+                ${TCP_PACKET_FILTER_OP} -j ${VNET_CHAIN}"
+   exec_or_die "${IP6TABLES} -I OUTPUT ${VNET_PACKET_STAMP} \
+                ${TCP_PACKET_FILTER_OP} -j ${VNET_CHAIN}"
+   exec_or_die "${IP6TABLES} -I ${VNET_CHAIN} -j ${NFQUEUE_BYPASS}"
+}
+
+remove_vnetchain_filter_rules() {
+   exec_or_warn "${IPTABLES} -D INPUT ${VNET_PACKET_STAMP} \
+                 ${TCP_PACKET_FILTER_OP} -j ${VNET_CHAIN}"
+   exec_or_warn "${IPTABLES} -D OUTPUT ${VNET_PACKET_STAMP} \
+                 ${TCP_PACKET_FILTER_OP} -j ${VNET_CHAIN}"
+   exec_or_warn "${IPTABLES} -D ${VNET_CHAIN} -j ${NFQUEUE_BYPASS}"
+
+   exec_or_warn "${IP6TABLES} -D INPUT ${VNET_PACKET_STAMP} \
+                 ${TCP_PACKET_FILTER_OP} -j ${VNET_CHAIN}"
+   exec_or_warn "${IP6TABLES} -D OUTPUT ${VNET_PACKET_STAMP} \
+                 ${TCP_PACKET_FILTER_OP} -j ${VNET_CHAIN}"
+   exec_or_warn "${IP6TABLES} -D ${VNET_CHAIN} -j ${NFQUEUE_BYPASS}"
+
+   exec_or_warn "${IPTABLES} -X ${VNET_CHAIN}"
+   exec_or_warn "${IP6TABLES} -X ${VNET_CHAIN}"
+}
+
+# Start the service
+start () {
+   if [ "`id -u`" -ne 0 ] ; then
+      LOG_FAILURE "User has insufficient privilege."
+      exit 4
+   fi
+
+   #
+   # Check if there's already running instance of vmw_conn_notify, using lock_file
+   # and using pidof command.. so at any time we will run only one instance
+   #
+   if [ -f $LOCK_FILE -a -n "`pidof $VMW_CONN_NOTIFY_BIN`" ] ; then
+      if [ "$OS" = "Suse" ] ; then
+         STATUS $VMW_CONN_NOTIFY_BIN
+         rc_status -v
+      elif [ "$OS" = "Redhat" ] ; then
+         STATUS $VMW_CONN_NOTIFY_BIN
+      elif [ "$OS" = "Ubuntu" ] ; then
+         STATUS $VMW_CONN_NOTIFY_BIN
+      fi
+      exit 7;
+   fi
+
+   echo "Starting $VMW_CONN_NOTIFY_NAME service"
+
+   load_netfilter_modules
+   add_vnetchain_filter_rules
+
+   START_DAEMON $VMW_CONN_NOTIFY_BIN
+   if [ "$?" -eq 0 ] ; then
+      ### Create the lock file ###
+      mkdir -p /var/lock/subsys
+      touch $LOCK_FILE
+
+   else
+      LOG_FAILURE "$VMW_CONN_NOTIFY_NAME service startup error: $?"
+      remove_vnetchain_filter_rules
+   fi
+
+   BLANK_LINE
+}
+
+# Stop the service
+stop() {
+   if [ "`id -u`" -ne 0 ] ; then
+      LOG_FAILURE "User has insufficient privilege."
+      exit 4
+   fi
+
+   echo "Stopping $VMW_CONN_NOTIFY_NAME service"
+
+   STOP_DAEMON $VMW_CONN_NOTIFY_BIN -TERM
+   if [ "$?" -eq 0 ] ; then
+      ### Now, delete the lock file ###
+      rm -f $LOCK_FILE
+
+      ### sleep for few seconds, wait for thin-agent to stop
+      sleep $VMW_CONN_NOTIFY_STOP_TIME
+   else
+      LOG_FAILURE "$VMW_CONN_NOTIFY_NAME service stop error: $?"
+   fi
+
+   remove_vnetchain_filter_rules
+
+   # Do not unload loaded netfilter modules as they might be in use by other
+   # user-land or kernel components
+
+   BLANK_LINE
+}
+
+### main logic ###
+case "$1" in
+   start)
+      start
+      if [ "$OS" = "Suse" ] ; then
+         rc_status -v
+      fi
+      ;;
+   stop)
+      stop
+      if [ "$OS" = "Suse" ] ; then
+         rc_status -v
+      fi
+      ;;
+   status)
+      echo -n "Checking for $VMW_CONN_NOTIFY_NAME service: "
+      if [ "$OS" = "Suse" ] ; then
+         STATUS $VMW_CONN_NOTIFY_BIN
+         rc_status -v
+      elif [ "$OS" = "Redhat" ] ; then
+         STATUS $VMW_CONN_NOTIFY_BIN
+      elif [ "$OS" = "Ubuntu" ] ; then
+         STATUS $VMW_CONN_NOTIFY_BIN
+      fi
+      ;;
+   restart|force-reload)
+      stop
+      # Sleep for few seconds for the MUX connection to get refreshed
+      sleep 3
+      start
+      if [ "$OS" = "Suse" ] ; then
+         rc_status
+      fi
+      ;;
+   *)
+      echo "Usage: $0 {start|stop|restart|status|force-reload}"
+      exit 1
+esac
+exit 0
