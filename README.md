@@ -42,7 +42,7 @@ You can get involved today in several different ways:
 
 * Suggest feature enhancements.
 
-* Identify and submit bugs under issues section: https://github.com/vmware/open-vm-tools/issues
+* Identify and submit bugs under issues section: https://github.com/vmware/guest-introspection-nsx/issues
 
 
 ## Will external developers be allowed to become committers to the project?
