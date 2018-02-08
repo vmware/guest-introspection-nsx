@@ -2,11 +2,11 @@
 #define VMW_CONN_H
 /*
  *
- * Copyright (C) 2017 VMware, Inc. All rights reserved.
+ * Copyright (C) 2018 VMware, Inc. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify it under
- * the terms of the GNU General Public License version 2 as published by the
- * Free Software Foundation (or any later at your option)
+ * the terms of the GNU General Public License as published by the
+ * Free Software Foundation; version 2.
 
  * This program is distributed in the hope that it will be useful, but WITHOUT
  * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
@@ -20,7 +20,7 @@
  */
 
 /*
- * SPDX-License-Identifier: GPL-2.0-or-later
+ * SPDX-License-Identifier: GPL-2.0-only
  */
 
 /*
@@ -99,19 +99,26 @@ struct vmw_client_scope {
                                         verdict */
    uint8_t pkthash_cleanup_wait;       /* Wait for completion of on-going
                                           pkthash clean */
-   int  client_mark;                   /* client specified mark to be set in
-                                          verdict*/
+   unsigned long client_mark;          /* client specified mark to be set in
+                                         verdict*/
 };
+
+/* Per packet info maintained in hash table */
+typedef struct _vmw_packet_info {
+   int event_id;                    /* Id information per packet */
+   uint32_t ref_count;              /* Number of client referring to packet */
+   uint32_t mark;                   /* Mark on the packet */
+} packet_info;
 
 /* Packet info from client */
 typedef struct _vmw_verdict {
-   int packetId;
-   int verdict;
+   int packetId;                    /* packet tracking id for client */
+   int verdict;                     /* verdict received from client */
 } vmw_verdict;
 
 /* version and mark info per client */
 typedef struct clientInfo {
-   int version;
-   int mark;
+   int version;                     /* Client version */
+   unsigned long mark;              /* Client mark to be registered */
 }clientInfo;
 #endif

@@ -2,8 +2,8 @@
  * Copyright (C) 2018 VMware, Inc. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify it under
- * the terms of the GNU General Public License version 2 as published by the
- * Free Software Foundation (or any later at your option)
+ * the terms of the GNU General Public License as published by the
+ * Free Software Foundation; version 2.
 
  * This program is distributed in the hope that it will be useful, but WITHOUT
  * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
@@ -17,7 +17,7 @@
  */
 
 /*
- * SPDX-License-Identifier: GPL-2.0-or-later
+ * SPDX-License-Identifier: GPL-2.0-only
  */
 
 /*
@@ -51,7 +51,7 @@
 extern volatile int g_vmw_init_done;
 extern void *vmw_init(void *);
 extern bool vmw_is_mark_unused(int mark);
-
+extern void cleanup_hash_table_entry(gpointer data);
 /* Global client context array */
 struct vmw_client_scope g_client_ctx[MAX_CLIENTS];
 
@@ -513,8 +513,10 @@ main(int argc, char **argv) {
        * Create per client  hash table for keeping record of packets which are
        * delivered to the client and verdict yet to be receivied for them.
        */
-      g_client_ctx[i].queued_pkthash = g_hash_table_new(g_direct_hash,
-                                                        g_direct_equal);
+      g_client_ctx[i].queued_pkthash = g_hash_table_new_full(g_direct_hash,
+                                                      g_direct_equal,
+                                                      NULL,
+                                                      cleanup_hash_table_entry);
       pthread_mutex_init(&g_client_ctx[i].client_sock_lock, NULL);
    }
 

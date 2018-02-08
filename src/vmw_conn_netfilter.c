@@ -1,10 +1,10 @@
 /*
  *
- * Copyright (C) 2017 VMware, Inc. All rights reserved.
+ * Copyright (C) 2018 VMware, Inc. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify it under
- * the terms of the GNU General Public License version 2 as published by the
- * Free Software Foundation (or any later at your option)
+ * the terms of the GNU General Public License as published by the
+ * Free Software Foundation; version 2.
 
  * This program is distributed in the hope that it will be useful, but WITHOUT
  * ANY WARRANTY; without even the implied warranty of MERCHANTABILITY or FITNESS
@@ -18,7 +18,7 @@
  */
 
 /*
- * SPDX-License-Identifier: GPL-2.0-or-later
+ * SPDX-License-Identifier: GPL-2.0-only
  */
 
 /*
@@ -103,6 +103,21 @@ extern int
 vmw_wait_for_event(int, fd_set *, uint8_t);
 extern void
 vmw_notify_exit();
+
+/*
+ * Destructor for the value entry of hash table
+ */
+void
+cleanup_hash_table_entry(gpointer data)
+{
+   packet_info *packet = NULL;
+   if (data) {
+      packet = (packet_info *)data;
+      DEBUG("Cleaning packet data with eventid %d", packet->event_id);
+      free(data);
+      data = NULL;
+   }
+}
 
 /*
  * Check if the mark provided by client is in use already.
@@ -260,11 +275,17 @@ vmw_queued_pkthash_cleanup(struct vmw_net_session *sess,
    GHashTableIter iter;
    gpointer key = NULL;
    gpointer value = NULL;
+   packet_info *packet = NULL;
    uint32_t event_id;
+   uint32_t packet_mark = VMW_NFQ_PKT_MARK;
 
    g_hash_table_iter_init(&iter, client_ptr->queued_pkthash);
    while (g_hash_table_iter_next(&iter, &key,  &value)) {
       event_id = GPOINTER_TO_UINT(key);
+      if (value) {
+         packet = (packet_info *)value;
+         packet_mark = packet->mark;
+      }
       pthread_mutex_lock(&sess->queue_lock);
 
       /*
@@ -274,7 +295,7 @@ vmw_queued_pkthash_cleanup(struct vmw_net_session *sess,
       nfq_set_verdict2(sess->queue_ctx.qhandle,
                       event_id,
                       NF_REPEAT,
-                      VMW_NFQ_PKT_MARK,
+                      packet_mark,
                       0,
                       NULL);
       pthread_mutex_unlock(&sess->queue_lock);
@@ -294,6 +315,10 @@ vmw_client_msg_recv(void *arg)
    uint32_t event_id;
    uint8_t new_client_connreq = 1;
    vmw_verdict client_verdict = { 0 };
+   packet_info *packet = NULL;
+   uint32_t packet_mark = 0;
+   gpointer key;
+   gpointer value = NULL;
 
    while(1) {
       if (ATOMIC_OR(&g_need_to_quit, 0)) {
@@ -351,6 +376,18 @@ vmw_client_msg_recv(void *arg)
                continue;
             }
 
+            g_hash_table_lookup_extended(g_client_ctx[i].queued_pkthash,
+                                    GUINT_TO_POINTER(client_verdict.packetId),
+                                    &key,
+                                    &value);
+
+            if (value != NULL) {
+               packet = (packet_info *) value;
+               packet_mark = packet->mark;
+            } else {
+               packet_mark = VMW_NFQ_PKT_MARK;
+            }
+
             if (client_verdict.verdict != NF_DROP) {
                client_verdict.verdict = NF_REPEAT;
             }
@@ -361,7 +398,7 @@ vmw_client_msg_recv(void *arg)
             nfq_set_verdict2(sess->queue_ctx.qhandle,
                             client_verdict.packetId,
                             client_verdict.verdict,
-                            g_client_ctx[i].client_mark,
+                            packet_mark,
                             0,
                             NULL);
             pthread_mutex_unlock(&sess->queue_lock);
@@ -374,10 +411,23 @@ vmw_client_msg_recv(void *arg)
 
 /* Deliver network event to the connected clients */
 int
-vmw_conn_data_send(struct vmw_conn_identity_data *conn_data)
+vmw_conn_data_send(struct vmw_conn_identity_data *conn_data,
+                   uint32_t packet_mark)
 {
    int i, sd;
    int ret = 0;
+   uint32_t mark = 0;
+   packet_info *packet = NULL;
+
+   packet = (packet_info *) malloc(sizeof(packet_info));
+   if (NULL == packet) {
+      ret = -1;
+      ERROR("Failed to allocate packet info");
+      goto exit;
+   }
+   packet->event_id = conn_data->event_id ;
+   packet->ref_count = 0;
+   mark = packet_mark;
 
    for (i = 0; i < MAX_CLIENTS; i++)  {
       pthread_mutex_lock(&g_client_ctx[i].client_sock_lock);
@@ -385,6 +435,7 @@ vmw_conn_data_send(struct vmw_conn_identity_data *conn_data)
       pthread_mutex_unlock(&g_client_ctx[i].client_sock_lock);
       if (sd > 0) {
          if (conn_data->event_id) {
+            packet->mark = mark | g_client_ctx[i].client_mark;
             /*
              * Record event_id into queued_pkthash as client response is
              * required for this event id.
@@ -398,9 +449,10 @@ vmw_conn_data_send(struct vmw_conn_identity_data *conn_data)
              * in case of client termination, it is required to provide verdict
              * for each packet id queued in the queued_pkthash.
              */
+            DEBUG("Packet event_id %d mark %u",packet->event_id, packet->mark);
             g_hash_table_insert(g_client_ctx[i].queued_pkthash,
                                 GUINT_TO_POINTER(conn_data->event_id),
-                                NULL);
+                                (gpointer) packet);
          }
          ret = send(sd, conn_data, sizeof(*conn_data), 0);
          if (ret <= 0) {
@@ -420,7 +472,8 @@ exit:
 /* Log connection related data and sends the data to client */
 int
 vmw_client_notify(struct vmw_conn_identity_data *conn_data,
-                  struct vmw_net_session *sess)
+                  struct vmw_net_session *sess,
+                  uint32_t packet_mark)
 {
    int ret = -1;
 
@@ -440,7 +493,7 @@ vmw_client_notify(struct vmw_conn_identity_data *conn_data,
       goto exit;
    }
 
-   ret = vmw_conn_data_send(conn_data);
+   ret = vmw_conn_data_send(conn_data, packet_mark);
 
 exit:
    return ret;
@@ -606,7 +659,7 @@ vmw_net_conntrack_callback(enum nf_conntrack_msg_type type,
    conn_data->event_id = 0;
 
    /* Send the packet to client */
-   (void)vmw_client_notify(conn_data, sess);
+   (void)vmw_client_notify(conn_data, sess, 0);
 
 exit:
    if (conn_data) {
@@ -848,11 +901,13 @@ vmw_net_queue_callback(struct nfq_q_handle *qh,
       goto exit;
    }
 
+   packet_mark = nfq_get_nfmark(nfa);
+
    conn_data->event_type = event_type;
    conn_data->event_id = event_id;
 
    /* Deliver packet to client */
-   ret = vmw_client_notify(conn_data, sess);
+   ret = vmw_client_notify(conn_data, sess, packet_mark);
    if (ret <= 0) {
       goto exit;
    }
