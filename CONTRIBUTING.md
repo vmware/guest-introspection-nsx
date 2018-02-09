@@ -6,9 +6,9 @@ The guest-introspection-nsx project team welcomes contributions from the communi
 signed our contributor license agreement (CLA), our bot will update the issue when you open a Pull Request. For any
 questions about the CLA process, please refer to our [FAQ](https://cla.vmware.com/faq).
 
-## Community
+## Logging Bugs
 
-## Getting Started
+Anyone can log a bug using the GitHub 'New Issue' button. Please use a short title and give as much information as you can about what the problem is, relevant software versions, and how to reproduce it. If you know the fix or a workaround include that too.
 
 ## Contribution Flow
 
@@ -68,6 +68,8 @@ notification when you git push.
 
 ### Code Style
 
+Make sure your code look like code that is already there.
+
 ### Formatting Commit Messages
 
 We follow the conventions on [How to Write a Git Commit Message](http://chris.beams.io/posts/git-commit/).
@@ -80,4 +82,6 @@ and commits.
 
 When opening a new issue, try to roughly follow the commit message format conventions above.
 
-## Repository Structure
+## Final Words
+
+Thanks for helping us make the project better!
