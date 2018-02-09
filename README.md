@@ -11,7 +11,8 @@ Guest Introspection for VMware NSX provides following features:
   * Network connection monitoring (TCP and UDP)
  
 ### Dependencies 
-Guest Introspection for VMware NSX requires libnetfilter_queue, libnetfilter_conntrack and netfilter kernel modules.
+Guest Introspection for VMware NSX requires libnetfilter_queue, libnetfilter_conntrack and netfilter kernel modules and libglib-2.0.
+
 
 ### Availabiltiy
 Guest Introspection for VMware NSX is available on the following Linux distributions and versions:
@@ -21,7 +22,7 @@ Guest Introspection for VMware NSX is available on the following Linux distribut
 
 ### Build & Run
 
-The following steps will work on most recent Linux distributions:
+The following steps will work on most recent Linux distributions (Please install libnetfilter_queue, libnetfilter_conntrack and libglib-2.0 into appropriate path before building. For path, please refer makefile) :
 
 * make
 * sudo make install
