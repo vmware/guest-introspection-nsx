@@ -2,7 +2,7 @@
 #define VMW_CONN_H
 /*
  *
- * Copyright (C) 2017 VMware, Inc. All rights reserved.
+ * Copyright (C) 2018 VMware, Inc. All rights reserved.
  *
  * This program is free software; you can redistribute it and/or modify it under
  * the terms of the GNU General Public License as published by the
