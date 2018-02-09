@@ -11,22 +11,25 @@ Guest Introspection for VMware NSX provides following features:
   * Network connection monitoring (TCP and UDP)
  
 ### Dependencies 
-Guest Introspection Daemon for VMware NSX requires libnetfilter_queue, libnetfilter_conntrack and netfilter kernel modules.
+Guest Introspection for VMware NSX requires libnetfilter_queue, libnetfilter_conntrack and netfilter kernel modules.
 
 ### Availabiltiy
-Guest Introspection Daemon for VMware NSX is available on the following Linux distributions and versions:
+Guest Introspection for VMware NSX is available on the following Linux distributions and versions:
  * Ubuntu 14.04 LTS 64-bit
  * RHEL 7 64-bit 
  * SLES 12 SP2 64-bit
 
-### Build 
+### Build & Run
 
 The following steps will work on most recent Linux distributions:
 
-* autoreconf -i
-* ./configure 
 * make
 * sudo make install
+
+Use the following step to start daemon
+* /etc/init.d/vmw_conn_notifyd start
+
+To change  syslog logging level of this daemon, please update DEBUG_LEVEL in /etc/vmw_conn_notify/vmw_conn_notify.conf. The accepted value of the logging level is from 0 to 7.
 
 # Contributing
 
@@ -38,7 +41,7 @@ questions about the CLA process, please refer to our [FAQ](https://cla.vmware.co
 
 You can get involved today in several different ways:
 
-* Start using open-vm-tools today and give us feedback.
+* Start using guest-introspection-nsx today and give us feedback.
 
 * Suggest feature enhancements.
 
