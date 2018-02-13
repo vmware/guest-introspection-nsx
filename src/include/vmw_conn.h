@@ -50,7 +50,6 @@
 #include <arpa/inet.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
-#include <netinet/udp.h>
 #include <netinet/ip.h>
 #include <netinet/ip6.h>
 
@@ -73,7 +72,8 @@
 /* Maximum number of supported client */
 #define MAX_CLIENTS 1
 
-/* Network event Type */
+
+/* Network event Tyoe */
 enum vmw_conn_event_type {
    OUTBOUND_PRECONNECT = 1,            /* Outgoing connection initiation*/
    POSTCONNECT,                        /* Established connection */
@@ -88,7 +88,6 @@ struct vmw_conn_identity_data {
    struct sockaddr_storage dst;           /* Destination ip */
    enum vmw_conn_event_type event_type;   /* Network connection type */
    uint32_t event_id;                     /* Event id */
-   uint8_t protocol;                      /* L3 protocol */
 };
 
 struct vmw_client_scope {
@@ -99,26 +98,5 @@ struct vmw_client_scope {
                                         verdict */
    uint8_t pkthash_cleanup_wait;       /* Wait for completion of on-going
                                           pkthash clean */
-   unsigned long client_mark;          /* client specified mark to be set in
-                                         verdict*/
 };
-
-/* Per packet info maintained in hash table */
-typedef struct _vmw_packet_info {
-   int event_id;                    /* Id information per packet */
-   uint32_t ref_count;              /* Number of client referring to packet */
-   uint32_t mark;                   /* Mark on the packet */
-} packet_info;
-
-/* Packet info from client */
-typedef struct _vmw_verdict {
-   int packetId;                    /* packet tracking id for client */
-   int verdict;                     /* verdict received from client */
-} vmw_verdict;
-
-/* version and mark info per client */
-typedef struct clientInfo {
-   int version;                     /* Client version */
-   unsigned long mark;              /* Client mark to be registered */
-}clientInfo;
 #endif
