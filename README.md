@@ -19,6 +19,7 @@ Guest Introspection for VMware NSX is available on the following Linux distribut
  * Ubuntu 14.04 LTS 64-bit
  * RHEL 7 64-bit 
  * SLES 12 SP2 64-bit
+ * CentOS 7 64 bit
 
 ### Build & Run
 
