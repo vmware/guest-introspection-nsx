@@ -71,7 +71,7 @@
 #define PROG_NAME "vmw_conn_notfiy"
 
 /* Maximum number of supported client */
-#define MAX_CLIENTS 1
+#define MAX_CLIENTS 2
 
 /* Network event Type */
 enum vmw_conn_event_type {
@@ -97,28 +97,33 @@ struct vmw_client_scope {
    int client_version;                 /* Client version */
    GHashTable *queued_pkthash;         /* Hash table to store packets queued for
                                         verdict */
-   uint8_t pkthash_cleanup_wait;       /* Wait for completion of on-going
-                                          pkthash clean */
-   unsigned long client_mark;          /* client specified mark to be set in
-                                         verdict*/
+   uint8_t pkthash_cleanup_wait;       /* Client hashtable cleanup in progress */
 };
 
-/* Per packet info maintained in hash table */
-typedef struct _vmw_packet_info {
-   int event_id;                    /* Id information per packet */
+/* Client fd in cleanup is not considered a free fd */
+#define IS_CLIENT_FD_FREE(ctx)   \
+   ((ctx.client_sockfd < 0) && (!ctx.pkthash_cleanup_wait))
+
+/* Packet info maintained in the global hash table */
+typedef struct _vmw_global_packet_info {
+   uint32_t event_id;                    /* Id information per packet */
    uint32_t ref_count;              /* Number of client referring to packet */
-   uint32_t mark;                   /* Mark on the packet */
-} packet_info;
+   uint32_t mark;                   /* Mark to be set on the packet */
+   pthread_mutex_t lock;            /* lock protecting this structure */
+} global_packet_info;
 
 /* Packet info from client */
 typedef struct _vmw_verdict {
-   int packetId;                    /* packet tracking id for client */
+   uint32_t packetId;                    /* packet tracking id for client */
    int verdict;                     /* verdict received from client */
 } vmw_verdict;
 
 /* version and mark info per client */
 typedef struct clientInfo {
    int version;                     /* Client version */
-   unsigned long mark;              /* Client mark to be registered */
-}clientInfo;
+#if 0
+   unsigned int protocol;           /* Protocol events for which client is
+                                       interested */
+#endif
+} clientInfo;
 #endif

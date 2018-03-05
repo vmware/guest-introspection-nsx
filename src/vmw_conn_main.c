@@ -50,13 +50,16 @@
 
 extern volatile int g_vmw_init_done;
 extern void *vmw_init(void *);
-extern bool vmw_is_mark_unused(int mark);
-extern void cleanup_hash_table_entry(gpointer data);
+extern void cleanup_client_hash_entry(gpointer data);
+extern void cleanup_global_hash_entry(gpointer data);
 /* Global client context array */
 struct vmw_client_scope g_client_ctx[MAX_CLIENTS];
 
 /* Global variable to indicate process termintation/shutdown event */
 volatile int g_need_to_quit  = 0;
+
+/* Global hash table to store packets queued for verdict */
+GHashTable *global_queued_pkthash;
 
 /*
  * Array of FDs  to break select() in case of shutdown event or new client
@@ -455,7 +458,6 @@ main(int argc, char **argv) {
    int sock = -1, new_socket = -1;
    uint32_t version = 1;
    uint8_t new_client_connreq = 0;
-   bool mark_unused = FALSE;
    clientInfo cInfo = { 0 };
 
    /* Process command line options */
@@ -508,15 +510,18 @@ main(int argc, char **argv) {
    master = readfds;
    maxfd = sock;
 
+   global_queued_pkthash = g_hash_table_new_full(g_direct_hash,
+                                                 g_direct_equal,
+                                                 NULL,
+                                                 cleanup_global_hash_entry);
    for (i = 0; i < MAX_CLIENTS; i++) {
       /*
        * Create per client  hash table for keeping record of packets which are
        * delivered to the client and verdict yet to be receivied for them.
        */
-      g_client_ctx[i].queued_pkthash = g_hash_table_new_full(g_direct_hash,
-                                                      g_direct_equal,
-                                                      NULL,
-                                                      cleanup_hash_table_entry);
+      g_client_ctx[i].client_sockfd = -1;
+      g_client_ctx[i].queued_pkthash = g_hash_table_new(g_direct_hash,
+                                                        g_direct_equal);
       pthread_mutex_init(&g_client_ctx[i].client_sock_lock, NULL);
    }
 
@@ -550,14 +555,14 @@ main(int argc, char **argv) {
       if (-1 == new_socket) {
          ERROR("bind() failed with error %s", strerror(errno));
          ret = new_socket;
-         goto exit;
+         ret = -1;
+         goto cleanup;
       }
 
       INFO("Connection from client socket %d is recevied", new_socket);
       for (i = 0; i < MAX_CLIENTS; i++) {
          pthread_mutex_lock(&g_client_ctx[i].client_sock_lock);
-         if (g_client_ctx[i].client_sockfd <= 0 &&
-             !g_client_ctx[i].pkthash_cleanup_wait) {
+         if (IS_CLIENT_FD_FREE(g_client_ctx[i])) {
             pthread_mutex_unlock(&g_client_ctx[i].client_sock_lock);
             ret = recv(new_socket, (void *)&cInfo, sizeof(clientInfo), 0);
             if (ret <= 0) {
@@ -567,27 +572,20 @@ main(int argc, char **argv) {
                new_socket = -1;
                break;
             }
-            mark_unused = vmw_is_mark_unused(cInfo.mark);
-            if (FALSE == mark_unused) {
-               ERROR("Failed to complete connection with client socket %d, "
-                     "error %s", new_socket, strerror(errno));
-               close(new_socket);
-               break;
-            }
             /*
              * The version can be used to identify client verdict but currenty
              * it is not used.
+             * TODO: Send shim mark to client
              */
             send(new_socket, &version, sizeof(version), 0);
 
             pthread_mutex_lock(&g_client_ctx[i].client_sock_lock);
             g_client_ctx[i].client_version = cInfo.version;
-            g_client_ctx[i].client_mark = cInfo.mark;
             g_client_ctx[i].client_sockfd = new_socket;
             pthread_mutex_unlock(&g_client_ctx[i].client_sock_lock);
             INFO("Adding client to the list of connected client as "
-                 "socket %d at index %d version %x mark %x", new_socket, i,
-                cInfo.version, cInfo.mark);
+                 "socket %d at index %d version %x", new_socket, i,
+                cInfo.version);
 
             /*
              * Send new client connection notification to vmw_client_msg_recv
@@ -618,6 +616,7 @@ main(int argc, char **argv) {
       pthread_join(init_thread, NULL);
    }
 
+cleanup:
    for (i = 0; i < MAX_CLIENTS; i++) {
       if (g_client_ctx[i].client_sockfd > 0) {
          close(g_client_ctx[i].client_sockfd);
@@ -626,14 +625,15 @@ main(int argc, char **argv) {
       g_hash_table_remove_all(g_client_ctx[i].queued_pkthash);
       g_hash_table_destroy(g_client_ctx[i].queued_pkthash);
    }
+   g_hash_table_remove_all(global_queued_pkthash);
+   g_hash_table_destroy(global_queued_pkthash);
 
+   closelog();
+   unlink(VMW_PID_FILE);
+
+exit:
    if (sock > 0) {
       close(sock);
    }
-   closelog();
-   unlink(VMW_PID_FILE);
-   ret = 0;
-
-exit:
    return ret;
 }

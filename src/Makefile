@@ -29,7 +29,7 @@ LIB_NETFILTER_INCLUDE=-I/usr/src/debug/libnetfilter_conntrack-1.0.6/include/
 endif
 
 GLIB_INCLUDES=-I/usr/include/glib-2.0 -I/usr/lib64/glib-2.0/include/ $(LIB_NETFILTER_INCLUDE) 
-CFLAGS=$(INCLUDES) $(GLIB_INCLUDES)
+CFLAGS=$(INCLUDES) $(GLIB_INCLUDES) -g
 VMW_OPEN_LIBNETFLT_OBJS=-L/usr/lib64/,/usr/lib/x86_64-linux-gnu/lib, \
 								 -lmnl -lnfnetlink -lpthread\
 								 -lnetfilter_queue -lnetfilter_conntrack -lglib-2.0
