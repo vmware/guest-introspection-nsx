@@ -73,6 +73,14 @@
 /* Maximum number of supported client */
 #define MAX_CLIENTS 2
 
+/*
+ * Client will register with vmw_conn_notify for protocols they are
+ * interested in. These macros indicate how the bits in the 'protocol'
+ * field of vmw_client_info are interpreted.
+ */
+#define TCP_SUPPORT 1<<0
+#define UDP_SUPPORT 1<<1
+
 /* Network event Type */
 enum vmw_conn_event_type {
    OUTBOUND_PRECONNECT = 1,            /* Outgoing connection initiation*/
@@ -97,7 +105,9 @@ struct vmw_client_scope {
    int client_version;                 /* Client version */
    GHashTable *queued_pkthash;         /* Hash table to store packets queued for
                                         verdict */
-   uint8_t pkthash_cleanup_wait;       /* Client hashtable cleanup in progress */
+   uint8_t pkthash_cleanup_wait;       /* Client hashtable cleanup in progress*/
+   uint32_t client_proto_info;         /* Protocol info for which client is
+                                        interested */
 };
 
 /* Client fd in cleanup is not considered a free fd */
@@ -119,11 +129,9 @@ typedef struct _vmw_verdict {
 } vmw_verdict;
 
 /* version and mark info per client */
-typedef struct clientInfo {
+typedef struct _vmw_client_info {
    int version;                     /* Client version */
-#if 0
-   unsigned int protocol;           /* Protocol events for which client is
+   uint32_t protocol;               /* Protocol events for which client is
                                        interested */
-#endif
-} clientInfo;
+} vmw_client_info;
 #endif

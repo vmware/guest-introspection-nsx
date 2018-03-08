@@ -458,7 +458,7 @@ main(int argc, char **argv) {
    int sock = -1, new_socket = -1;
    uint32_t version = 1;
    uint8_t new_client_connreq = 0;
-   clientInfo cInfo = { 0 };
+   vmw_client_info client_info = { 0 };
 
    /* Process command line options */
    if (vmw_process_option(argc, argv)) {
@@ -564,7 +564,7 @@ main(int argc, char **argv) {
          pthread_mutex_lock(&g_client_ctx[i].client_sock_lock);
          if (IS_CLIENT_FD_FREE(g_client_ctx[i])) {
             pthread_mutex_unlock(&g_client_ctx[i].client_sock_lock);
-            ret = recv(new_socket, (void *)&cInfo, sizeof(clientInfo), 0);
+            ret = recv(new_socket, (void *)&client_info, sizeof(vmw_client_info), 0);
             if (ret <= 0) {
                ERROR("Failed to complete connection with client socket %d, "
                      "error %s", new_socket, strerror(errno));
@@ -580,12 +580,13 @@ main(int argc, char **argv) {
             send(new_socket, &version, sizeof(version), 0);
 
             pthread_mutex_lock(&g_client_ctx[i].client_sock_lock);
-            g_client_ctx[i].client_version = cInfo.version;
+            g_client_ctx[i].client_version = client_info.version;
             g_client_ctx[i].client_sockfd = new_socket;
+            g_client_ctx[i].client_proto_info = client_info.protocol;
             pthread_mutex_unlock(&g_client_ctx[i].client_sock_lock);
-            INFO("Adding client to the list of connected client as "
-                 "socket %d at index %d version %x", new_socket, i,
-                cInfo.version);
+            INFO("Adding client to the list of connected client as socket %d "
+                 "at index %d version %x protocol %x",
+                 new_socket, i, client_info.version, client_info.protocol);
 
             /*
              * Send new client connection notification to vmw_client_msg_recv

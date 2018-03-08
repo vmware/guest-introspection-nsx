@@ -58,6 +58,7 @@
 #define VMW_LOOPBACK_ADDRESS "127.0.0.1"
 #define VMW_LOOPBACK_MASK 0xffffffff
 
+
 /*
  * A wrapper structure to keep netfilter queue handle and FD for getting
  * packets from queue library/kernel module.
@@ -111,6 +112,32 @@ vmw_wait_for_event(int, fd_set *, uint8_t);
 extern void
 vmw_notify_exit();
 
+/*
+ * Check if the client registered protocol and packet protocol matches
+ */
+static inline bool
+vmw_match_protocols(struct vmw_client_scope client,
+                    struct vmw_conn_identity_data *conn)
+{
+   bool match = FALSE;
+   switch (conn->protocol) {
+       case IPPROTO_TCP :
+       {
+          match = client.client_proto_info & TCP_SUPPORT ? TRUE :FALSE;
+          break;
+       }
+       case IPPROTO_UDP :
+       {
+          match = client.client_proto_info & UDP_SUPPORT ? TRUE : FALSE;
+          break;
+       }
+       default:
+       {
+         ERROR("Protocol %d not handled", conn->protocol);
+       }
+   }
+   return match;
+}
 /*
  * Destructor for the value entry of global hash table
  */
@@ -361,9 +388,6 @@ void *
 vmw_client_msg_recv(void *arg)
 {
    struct vmw_net_session *sess = (struct vmw_net_session *)arg;
-   global_packet_info *global_packet = NULL;
-   gpointer key;
-   gpointer value = NULL;
    vmw_verdict client_verdict = { 0 };
    fd_set client_fds;
    int sd, max_sd, i, activity, ret;
@@ -490,6 +514,14 @@ vmw_conn_data_send(struct vmw_conn_identity_data *conn_data,
       if (g_client_ctx[i].client_sockfd < 0) {
          pthread_mutex_unlock(&g_client_ctx[i].client_sock_lock);
          continue;
+      }
+      if (conn_data->event_id &&
+            !(vmw_match_protocols(g_client_ctx[i], conn_data))) {
+         DEBUG("Protocol mismatch: client protocol %x packet prtocol %u",
+                  g_client_ctx[i].client_proto_info, conn_data->protocol);
+         pthread_mutex_unlock(&g_client_ctx[i].client_sock_lock);
+         continue;
+
       }
       sd = g_client_ctx[i].client_sockfd;
 
