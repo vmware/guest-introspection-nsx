@@ -466,6 +466,11 @@ main(int argc, char **argv) {
       goto exit;
    }
 
+   if (version_flag) {
+      ret = 0;
+      goto exit;
+   }
+
    /* Setting the log level */
    vmw_handle_config_change_signal();
 
