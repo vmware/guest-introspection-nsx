@@ -1,4 +1,4 @@
-#!/bin/sh
+#!/bin/bash
 #
 # Copyright (C) 2018 VMware, Inc. All rights reserved.
 #
@@ -24,27 +24,38 @@
 # Configuration required for vmw_conn_notify
 #
 
-# Basic support for IRIX style chkconfig
-# chkconfig: 235 99 01
-# description: VMware Guest Introspection Service
-# processname: vmw_conn_notifyd
-# pidfile: /var/run/vmw_conn_notify.pid
-
 ### BEGIN INIT INFO
 # Provides:             vmw_conn_notifyd
 # Required-Start:       $network $remote_fs $syslog $time
 # Required-Stop:        $network $remote_fs $syslog $time
 # Default-Start:        2 3 4 5
 # Default-Stop:         0 1 6
-# Short-Description:    Network Connection Introspection Service
+# Short-Description:    VMware Network Connection Introspection Service
 # Description:          Manages the service need to run Network Connecion Introspection
 ### END INIT INFO
+shopt -s expand_aliases > /dev/null 2>&1
+export _SYSTEMCTL_SKIP_REDIRECT=1
 
 VMW_CONN_NOTIFY_NAME=vmw_conn_notify
 VMW_CONN_NOTIFY_BIN=/usr/sbin/$VMW_CONN_NOTIFY_NAME
 VMW_CONN_NOTIFY_CONFIG=/etc/vmw_conn_notify/vmw_conn_notify.cfg
 LOCK_FILE=/var/lock/subsys/vmw_conn_notifyd
 VMW_CONN_NOTIFY_STOP_TIME=2
+VMW_CONN_NOTIFY_WATCHDOG_NAME=vmw_conn_notifyd_watchdog
+VMW_CONN_NOTIFY_WATCHDOG=/usr/sbin/$VMW_CONN_NOTIFY_WATCHDOG_NAME
+
+# GM_STATUS related variables
+GM_SUCCESS=0
+GM_FAIL=1
+
+# logger variables
+VERBOSE=1
+SILENT=0
+LOG_LEVEL=$VERBOSE
+SUCCESS="info"
+ERROR="err"
+WARNING="warning"
+INFO="info"
 
 NFQUEUE_BYPASS="NFQUEUE --queue-num 0 --queue-bypass"
 TCP_PACKET_FILTER_OP="-p tcp --tcp-flags FIN,SYN,RST,ACK,PSH SYN"
@@ -53,7 +64,7 @@ VNET_CHAIN=vnetchain
 
 if [ -x  '/sbin/iptables' ]; then
    IPTABLES="/sbin/iptables"
-elif [ -x '/usr/sin/iptables' ]; then
+elif [ -x '/usr/sbin/iptables' ]; then
    IPTABLES="/usr/sbin/iptables"
 else
    IPTABLES="iptables"
@@ -61,7 +72,7 @@ fi
 
 if [ -x  '/sbin/ip6tables' ]; then
    IP6TABLES="/sbin/ip6tables"
-elif [ -x '/usr/sin/ip6tables' ]; then
+elif [ -x '/usr/sbin/ip6tables' ]; then
    IP6TABLES="/usr/sbin/ip6tables"
 else
    IP6TABLES="ip6tables"
@@ -69,9 +80,73 @@ fi
 
 MODPROBE="/sbin/modprobe"
 
+#####################################################################
+# Definition:
+# Function to log Success/Fail
+#
+# Arguments:
+# Argument 1: Return code
+# Argument 2: LOG_LEVEL
+#####################################################################
+eval_cmd() {
+   local rc=$1
+   local VERBOSE=1
+   local SILENT=0
+   local LOG_LEVEL=${2:-$VERBOSE}
+
+   if [ "${LOG_LEVEL}" -eq $VERBOSE ]; then
+     if [ "$rc" -eq "$GM_SUCCESS" ]; then
+       echo '[ OK ]'
+     else
+       echo '[ FAILED ]'
+     fi
+   fi
+
+   return "$rc"
+}
+
+#####################################################################
+# Definition:
+# Function to log messages
+#
+# Arguments:
+# Argument 1: String to print
+# Argument 2: LOG_LEVEL(SILENT(0) / VERBOSE(1)) (optional)
+# Argument 3: Log Status (success|info, warning, failure|err)
+#####################################################################
+vmw_logger() {
+   local VERBOSE=1
+   local SILENT=0
+   local STR=$1
+   local LOG_LEVEL=${2:-$VERBOSE}
+   local LOG_STATUS=${3:-"info"}
+
+   if [ "${LOG_LEVEL}" -eq $VERBOSE ]; then
+     echo "${STR}"
+   fi
+
+   case "$LOG_STATUS" in
+   "err"|"failure") # failure
+       LOG_STATUS="err"
+       ;;
+   "warn") # warning
+       LOG_STATUS="warning"
+       ;;
+   "info"|"success") # success
+       LOG_STATUS="info"
+       ;;
+   *)
+       LOG_STATUS="info"
+       ;;
+   esac
+
+   logger -p daemon.$LOG_STATUS -t "vmw_conn_notifyd[$$]" "$STR"
+
+}
+
 # Check for missing binaries
 if [ ! -f $VMW_CONN_NOTIFY_BIN ] ; then
-   echo "$VMW_CONN_NOTIFY_BIN not installed"
+   vmw_logger "$VMW_CONN_NOTIFY_BIN not installed" $VERBOSE $ERROR
    if [ "$1" = "stop" ] ; then
       exit 0
    else
@@ -88,44 +163,20 @@ fi
 OS=""
 if [ -f /etc/init.d/functions ] ; then
    OS="Redhat"
-   . /etc/init.d/functions
+   #. /etc/init.d/functions
 
-   DAEMON_COREFILE_LIMIT='ulimited'
-   alias START_DAEMON=daemon
-   alias STOP_DAEMON=killproc
-   alias STATUS=status
-   alias LOG_SUCCESS=success
-   alias LOG_FAILURE=failure
-   alias LOG_WARNING=warning
-   alias BLANK_LINE=echo
    MODPROBE_PARAM=""
 elif [ -f /lib/lsb/init-functions ] && [ -f /etc/rc.status ] ; then
    OS="Suse"
-   . /lib/lsb/init-functions
 
-   alias START_DAEMON=start_daemon
-   alias STOP_DAEMON=killproc
-   alias STATUS=checkproc
-   alias LOG_SUCCESS=log_success_msg
-   alias LOG_FAILURE=log_failure_msg
-   alias LOG_WARNING=log_warning_msg
-   alias BLANK_LINE='echo'
    MODPROBE_PARAM="--allow-unsupported-modules"
 elif [ -f /lib/lsb/init-functions ] ; then
    OS="Ubuntu"
-   . /lib/lsb/init-functions
 
-   alias START_DAEMON=start_daemon
-   alias STOP_DAEMON=killproc
-   alias STATUS=status_of_proc
-   alias LOG_SUCCESS=log_success_msg
-   alias LOG_FAILURE=log_failure_msg
-   alias LOG_WARNING=log_warning_msg
-   alias BLANK_LINE='echo'
    MODPROBE_PARAM=""
 else
    OS="Unsupported OS, exiting."
-   LOG_FAILURE $OS
+   vmw_logger $OS $SILENT $ERROR
    exit 1
 fi
 
@@ -137,8 +188,7 @@ exec_or_die() {
    if [ "$status" -ne 0 ]; then
       # Remove extra spaces if any because of indentation
       cmd=$(echo $cmd | /bin/sed 's/[[:space:]]/ /g')
-      LOG_FAILURE "Failure in executing \"$cmd\", error code: $status, \"$out\""
-      BLANK_LINE
+      vmw_logger "Failure in executing \"$cmd\", error code: $status, \"$out\"" $SILENT $ERROR
       exit 4
    fi
 }
@@ -151,8 +201,7 @@ exec_or_warn() {
    if [ "$status" -ne 0 ]; then
       # Remove extra spaces if any because of indentation
       cmd=$(echo $cmd | /bin/sed 's/[[:space:]]/ /g')
-      LOG_WARNING "\"$cmd\" returns with code: $status, message: \"$out\""
-      BLANK_LINE
+      vmw_logger "\"$cmd\" returns with code: $status, message: \"$out\"" $SILENT $ERROR
       return 4
    fi
 }
@@ -200,112 +249,264 @@ remove_vnetchain_filter_rules() {
    exec_or_warn "${IP6TABLES} -X ${VNET_CHAIN}"
 }
 
-# Start the service
-start () {
-   if [ "`id -u`" -ne 0 ] ; then
-      LOG_FAILURE "User has insufficient privilege."
-      exit 4
-   fi
+if [ "`id -u`" -ne 0 ] ; then
+   vmw_logger "User has insufficient privilege." $VERBOSE $ERROR
+   exit 4
+fi
 
-   #
+#####################################################################
+# Starts the watchdog service
+#####################################################################
+start_watchdog() {
+   local retval="$GM_SUCCESS"
+
+   # setsid creates a new session id for watchdog and
+   # keeps it running even if shell session is closed
+   # Watchdog is redundant when there is no systemd
+   # But necessary when there is upstart or SysVinit
+   setsid $VMW_CONN_NOTIFY_WATCHDOG >/dev/null 2>&1 < /dev/null &
+   retval=$?
+   return "$retval"
+}
+
+status_vmw_conn_notify() {
+
    # Check if there's already running instance of vmw_conn_notify, using lock_file
    # and using pidof command.. so at any time we will run only one instance
    #
+   # This assumes that we use full pathname to start (/usr/sbin/vmw_conn_notify)
+   local retval_vmw_conn_notify="$GM_SUCCESS"
+
    if [ -f $LOCK_FILE -a -n "`pidof $VMW_CONN_NOTIFY_BIN`" ] ; then
-      if [ "$OS" = "Suse" ] ; then
-         STATUS $VMW_CONN_NOTIFY_BIN
-         rc_status -v
-      elif [ "$OS" = "Redhat" ] ; then
-         STATUS $VMW_CONN_NOTIFY_BIN
-      elif [ "$OS" = "Ubuntu" ] ; then
-         STATUS $VMW_CONN_NOTIFY_BIN
-      fi
-      exit 7;
+      retval_vmw_conn_notify="$GM_SUCCESS"
+   else
+      retval_vmw_conn_notify="$GM_FAIL"
    fi
 
-   echo "Starting $VMW_CONN_NOTIFY_NAME service"
+   return "$retval_vmw_conn_notify"
+}
 
-   load_netfilter_modules
-   add_vnetchain_filter_rules
+#####################################################################
+# Queries the watchdog service
+#####################################################################
+status_watchdog() {
+   local retval="$GM_SUCCESS"
+   local pids=$(pgrep -f $VMW_CONN_NOTIFY_WATCHDOG_NAME)
 
-   START_DAEMON $VMW_CONN_NOTIFY_BIN
-   if [ "$?" -eq 0 ] ; then
+   if [ -n "$pids" ]; then
+      retval="$GM_SUCCESS"
+   else
+      retval="$GM_FAIL"
+   fi
+   return "$retval"
+}
+
+#####################################################################
+# Arguments:
+# Argument 1: LOG_LEVEL(SILENT(0) / VERBOSE(1))
+# Argument 2: NO_WATCHDOG (optional)
+#####################################################################
+start () {
+   local retval_watchdog="$GM_SUCCESS"
+   local retval_vmw_conn_notify="$GM_SUCCESS"
+   local retval="$GM_SUCCESS"
+   local VERBOSE=1
+   local SILENT=0
+   local LOG_LEVEL=${1:-$VERBOSE}
+
+   status_vmw_conn_notify
+   retval_vmw_conn_notify=$?
+   if [ "$retval_vmw_conn_notify" -ne "$GM_SUCCESS" ]; then
+      vmw_logger "Starting $VMW_CONN_NOTIFY_NAME service" $SILENT $INFO
+      $VMW_CONN_NOTIFY_BIN
+      retval_vmw_conn_notify=$?
+   fi
+
+   if [ "$retval_vmw_conn_notify" -ne "$GM_SUCCESS" ]; then
+      retval_vmw_conn_notify="$GM_FAIL"
+      vmw_logger "Unable to start $VMW_CONN_NOTIFY_NAME binary" $SILENT $ERROR
+   else
+      retval_vmw_conn_notify="$GM_SUCCESS"
+      vmw_logger "$VMW_CONN_NOTIFY_NAME binary started successfully" $SILENT $SUCCESS
       ### Create the lock file ###
       mkdir -p /var/lock/subsys
       touch $LOCK_FILE
-
-   else
-      LOG_FAILURE "$VMW_CONN_NOTIFY_NAME service startup error: $?"
-      remove_vnetchain_filter_rules
+      load_netfilter_modules
+      add_vnetchain_filter_rules
    fi
 
-   BLANK_LINE
+   status_watchdog
+   retval_watchdog=$?
+   if [ "$retval_watchdog" -ne "$GM_SUCCESS" ]; then
+      vmw_logger "Starting watchdog for $VMW_CONN_NOTIFY_NAME" $SILENT $INFO
+      start_watchdog
+      sleep 1
+      status_watchdog
+      retval_watchdog=$?
+   fi
+   # Display results for watchdog
+   if [ "$retval_watchdog" -ne "$GM_SUCCESS" ]; then
+      retval_watchdog="$GM_FAIL"
+      vmw_logger "Unable to start $VMW_CONN_NOTIFY_WATCHDOG_NAME" $SILENT $ERROR
+   else
+      retval_watchdog="$GM_SUCCESS"
+      vmw_logger "$VMW_CONN_NOTIFY_WATCHDOG_NAME started successfully" $SILENT $SUCCESS
+   fi
+
+   retval=$((retval_vmw_conn_notify || retval_watchdog))
+   if [ "$retval" -eq "$GM_SUCCESS" ]; then
+     vmw_logger "$VMW_CONN_NOTIFY_NAME service is running" $LOG_LEVEL $SUCCESS
+   else
+     vmw_logger "$VMW_CONN_NOTIFY_NAME service is stopped" $LOG_LEVEL $ERROR
+     remove_vnetchain_filter_rules
+   fi
+   eval_cmd "$retval" "$LOG_LEVEL"
+
+   return "$retval"
 }
 
-# Stop the service
+
+
+
+#####################################################################
+# Arguments:
+# Argument 1: LOG_LEVEL(SILENT(0) / VERBOSE(1))
+# Argument 2: NO_WATCHDOG (optional)
+#####################################################################
 stop() {
-   if [ "`id -u`" -ne 0 ] ; then
-      LOG_FAILURE "User has insufficient privilege."
-      exit 4
+   local retval_watchdog="$GM_SUCCESS"
+   local retval_vmw_conn_notify="$GM_SUCCESS"
+   local retval="$GM_SUCCESS"
+   local VERBOSE=1
+   local SILENT=0
+   local LOG_LEVEL=${1:-$VERBOSE}
+
+   vmw_logger "Stopping $VMW_CONN_NOTIFY_NAME service" $SILENT $INFO
+
+   status_watchdog
+   retval_watchdog=$?
+   if [ "$retval_watchdog" -eq "$GM_SUCCESS" ]; then
+      vmw_logger "Stopping $VMW_CONN_NOTIFY_WATCHDOG_NAME for vmw_conn_notify" $SILENT $SUCCESS
+      kill -SIGTERM `pgrep -f $VMW_CONN_NOTIFY_WATCHDOG_NAME`
+      sleep 1
+      status_watchdog
+      retval_watchdog=$?
+   fi
+   if [ "$retval_watchdog" -ne "$GM_SUCCESS" ]; then
+      retval_watchdog="$GM_SUCCESS"
+      vmw_logger "$VMW_CONN_NOTIFY_WATCHDOG_NAME stopped successfully" $SILENT $SUCCESS
+   else
+      retval_watchdog="$GM_FAIL"
+      vmw_logger "Failed to stop $VMW_CONN_NOTIFY_WATCHDOG_NAME" $SILENT $ERROR
    fi
 
-   echo "Stopping $VMW_CONN_NOTIFY_NAME service"
+   ### sleep for few seconds, wait for watchdog to stop
+   sleep $VMW_CONN_NOTIFY_STOP_TIME
 
-   STOP_DAEMON $VMW_CONN_NOTIFY_BIN -TERM
-   if [ "$?" -eq 0 ] ; then
-      ### Now, delete the lock file ###
+   status_vmw_conn_notify
+   retval_vmw_conn_notify=$?
+   if [ "$retval_vmw_conn_notify" -eq "$GM_SUCCESS" ]; then
+      vmw_logger "Stopping $VMW_CONN_NOTIFY_NAME binary" $SILENT $INFO
+      kill -SIGTERM `pidof $VMW_CONN_NOTIFY_NAME`
+      sleep 1
+      status_vmw_conn_notify
+      retval_vmw_conn_notify=$?
+   fi
+
+   if [ "$retval_vmw_conn_notify" -ne "$GM_SUCCESS" ]; then
+      retval_vmw_conn_notify="$GM_SUCCESS"
       rm -f $LOCK_FILE
-
       ### sleep for few seconds, wait for thin-agent to stop
       sleep $VMW_CONN_NOTIFY_STOP_TIME
+      vmw_logger "$VMW_CONN_NOTIFY_NAME binary stopped successfully" $SILENT $SUCCESS
    else
-      LOG_FAILURE "$VMW_CONN_NOTIFY_NAME service stop error: $?"
+      retval_vmw_conn_notify="$GM_FAIL"
+      vmw_logger "Failed to stop $VMW_CONN_NOTIFY_NAME binary" $SILENT $ERROR
    fi
 
+   retval=$((retval_vmw_conn_notify || retval_watchdog))
+   if [ "$retval" -eq "$GM_SUCCESS" ]; then
+     vmw_logger "$VMW_CONN_NOTIFY_NAME service is stopped" $LOG_LEVEL $SUCCESS
+   else
+     vmw_logger "$VMW_CONN_NOTIFY_NAME service is running" $LOG_LEVEL $ERROR
+   fi
    remove_vnetchain_filter_rules
 
-   # Do not unload loaded netfilter modules as they might be in use by other
-   # user-land or kernel components
+   eval_cmd "$retval" "$LOG_LEVEL"
 
-   BLANK_LINE
+   return "$retval"
+}
+
+
+#####################################################################
+# Arguments:
+# Argument 1: LOG_LEVEL(SILENT(0) / VERBOSE(1))
+# Argument 2: NO_WATCHDOG (optional)
+#####################################################################
+status() {
+   local retval_vmw_conn_notify="$GM_SUCCESS"
+   local retval_watchdog="$GM_SUCCESS"
+   local retval="$GM_SUCCESS"
+   local VERBOSE=1
+   local SILENT=0
+   local LOG_LEVEL=${1:-$VERBOSE}
+   local NO_WATCHDOG=${2:-0}
+
+   status_vmw_conn_notify
+   retval_vmw_conn_notify=$?
+   if [ "$retval_vmw_conn_notify" -ne "$GM_SUCCESS" ]; then
+      retval_vmw_conn_notify="$GM_FAIL"
+      vmw_logger "$VMW_CONN_NOTIFY_NAME binary is stopped" $SILENT $INFO
+   else
+      retval_vmw_conn_notify="$GM_SUCCESS"
+      vmw_logger "$VMW_CONN_NOTIFY_NAME binary is running" $SILENT $INFO
+   fi
+
+   if [ "${NO_WATCHDOG}" -eq 0 ]; then
+      status_watchdog
+      retval_watchdog=$?
+      if [ "$retval_watchdog" -ne "$GM_SUCCESS" ]; then
+         retval_watchdog="$GM_FAIL"
+         vmw_logger "$VMW_CONN_NOTIFY_WATCHDOG_NAME is stopped" $SILENT $INFO
+      else
+         retval_watchdog="$GM_SUCCESS"
+         vmw_logger "$VMW_CONN_NOTIFY_WATCHDOG_NAME is running" $SILENT $INFO
+      fi
+   fi
+
+   retval=$((retval_vmw_conn_notify || retval_watchdog))
+   if [ "$retval" -eq "$GM_SUCCESS" ]; then
+      vmw_logger "$VMW_CONN_NOTIFY_NAME service is running" $LOG_LEVEL $INFO
+   else
+      vmw_logger "$VMW_CONN_NOTIFY_NAME service is stopped" $LOG_LEVEL $INFO
+   fi
+
+   return "$retval"
 }
 
 ### main logic ###
 case "$1" in
+   # Argument : LOG_LEVEL(SILENT(0) / VERBOSE(1))
    start)
-      start
-      if [ "$OS" = "Suse" ] ; then
-         rc_status -v
-      fi
+      start $2
       ;;
+   # Argument : LOG_LEVEL(SILENT(0) / VERBOSE(1))
    stop)
-      stop
-      if [ "$OS" = "Suse" ] ; then
-         rc_status -v
-      fi
+      stop $2
       ;;
+   # Argument : LOG_LEVEL(SILENT(0) / VERBOSE(1))
    status)
-      echo -n "Checking for $VMW_CONN_NOTIFY_NAME service: "
-      if [ "$OS" = "Suse" ] ; then
-         STATUS $VMW_CONN_NOTIFY_BIN
-         rc_status -v
-      elif [ "$OS" = "Redhat" ] ; then
-         STATUS $VMW_CONN_NOTIFY_BIN
-      elif [ "$OS" = "Ubuntu" ] ; then
-         STATUS $VMW_CONN_NOTIFY_BIN
-      fi
+      status $2
       ;;
+   # Argument : LOG_LEVEL(SILENT(0) / VERBOSE(1))
    restart|force-reload)
-      stop
+      stop $2
       # Sleep for few seconds for the MUX connection to get refreshed
       sleep 3
-      start
-      if [ "$OS" = "Suse" ] ; then
-         rc_status
-      fi
+      start $2
       ;;
    *)
-      echo "Usage: $0 {start|stop|restart|status|force-reload}"
+      vmw_logger "Usage: $0 {start|stop|restart|status|force-reload}" $VERBOSE $ERROR
       exit 1
 esac
 exit 0
