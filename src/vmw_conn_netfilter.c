@@ -45,6 +45,10 @@
 #include <libnetfilter_conntrack/libnetfilter_conntrack.h>
 #include <libnetfilter_conntrack/libnetfilter_conntrack_tcp.h>
 
+#ifndef DNS_PORT
+#define DNS_PORT (53)
+#endif
+
 /* Maximum queue length to handle connection burst */
 #define VNET_NFQLENGTH 65536
 
@@ -97,6 +101,10 @@ struct vmw_net_session *vmw_net_sess_handle;
  */
 pthread_mutex_t global_pkthash_lock  = PTHREAD_MUTEX_INITIALIZER;
 
+/*
+ * Lock used to send the payload and message header to client over UDS
+ */
+pthread_mutex_t clientUDSLock;
 /*
  * Global variable indicates completion of all necessary
  * initialization
@@ -472,6 +480,7 @@ vmw_conn_data_send(struct vmw_conn_identity_data *conn_data,
    int i, sd;
    int ret = 0, refcnt = 0;
    uint32_t mark = 0;
+   char *buf = NULL;
 
    /*
     * The event id of each contrack event is zero. The conntrack event
@@ -496,7 +505,7 @@ vmw_conn_data_send(struct vmw_conn_identity_data *conn_data,
       pthread_mutex_init(&global_packet->lock, NULL);
       pthread_mutex_lock(&global_pkthash_lock);
       g_hash_table_replace(global_queued_pkthash,
-                           GUINT_TO_POINTER(conn_data->event_id),
+                           GUINT_TO_POINTER(global_packet->event_id),
                            (gpointer)global_packet);
       pthread_mutex_unlock(&global_pkthash_lock);
       /*
@@ -532,7 +541,27 @@ vmw_conn_data_send(struct vmw_conn_identity_data *conn_data,
       }
       pthread_mutex_unlock(&g_client_ctx[i].client_sock_lock);
 
-      ret = send(sd, conn_data, sizeof(*conn_data), 0);
+      if (conn_data->dns_payload->payload != NULL) {
+         buf = (char *) malloc(sizeof(*conn_data) + conn_data->dns_payload->len);
+         if(NULL == buf) {
+            ERROR("Failed to allocate memory for buf");
+            ret = -1;
+            goto exit;
+         }
+         memset(buf, 0, sizeof(*conn_data) + conn_data->dns_payload->len);
+         memcpy(buf, conn_data,sizeof(*conn_data));
+         memcpy(buf + sizeof(*conn_data), conn_data->dns_payload->payload,
+               conn_data->dns_payload->len);
+         pthread_mutex_lock(&clientUDSLock);
+         ret = send(sd, buf, sizeof(*conn_data) + conn_data->dns_payload->len, 0);
+         pthread_mutex_unlock(&clientUDSLock);
+         free(buf);
+
+      } else {
+         pthread_mutex_lock(&clientUDSLock);
+         ret = send(sd, conn_data, sizeof(*conn_data), 0);
+         pthread_mutex_unlock(&clientUDSLock);
+      }
       if (ret <= 0) {
          ERROR("Could not send event %u to client %d (error %s)",
                conn_data->event_id, sd, strerror(errno));
@@ -689,7 +718,7 @@ vmw_net_conntrack_callback(enum nf_conntrack_msg_type type,
                            struct nf_conntrack *ct,
                            void *data)
 {
-   struct vmw_conn_identity_data *conn_data = NULL;
+   struct vmw_conn_identity_data conn_data = { 0 };
    struct vmw_net_session *sess = (struct vmw_net_session *)data;
    uint8_t family;
    char state;
@@ -703,21 +732,14 @@ vmw_net_conntrack_callback(enum nf_conntrack_msg_type type,
       goto exit;
    }
 
-   conn_data = (struct vmw_conn_identity_data *)
-           malloc(sizeof(struct vmw_conn_identity_data));
-   if (!conn_data) {
-      ERROR("Memory allocation failed for msg data");
-      goto exit;
-   }
-
    /* Retrieve L3 protocol address and L4 protocol port number */
    family = nfct_get_attr_u8(ct, ATTR_L3PROTO);
    switch(family) {
    case AF_INET:
-      conn_data->src.ss_family = AF_INET;
-      conn_data->dst.ss_family = AF_INET;
-      struct sockaddr_in *src = (struct sockaddr_in *)&conn_data->src;
-      struct sockaddr_in *dst = (struct sockaddr_in *)&conn_data->dst;
+      conn_data.src.ss_family = AF_INET;
+      conn_data.dst.ss_family = AF_INET;
+      struct sockaddr_in *src = (struct sockaddr_in *)&conn_data.src;
+      struct sockaddr_in *dst = (struct sockaddr_in *)&conn_data.dst;
       src->sin_addr.s_addr = nfct_get_attr_u32(ct, ATTR_IPV4_SRC);
       dst->sin_addr.s_addr = nfct_get_attr_u32(ct, ATTR_IPV4_DST);
       src->sin_port = htons(nfct_get_attr_u32(ct, ATTR_PORT_SRC));
@@ -725,10 +747,10 @@ vmw_net_conntrack_callback(enum nf_conntrack_msg_type type,
       break;
 
    case AF_INET6:
-      conn_data->src.ss_family = AF_INET6;
-      conn_data->dst.ss_family = AF_INET6;
-      struct sockaddr_in6 *src6 = (struct sockaddr_in6 *)&conn_data->src;
-      struct sockaddr_in6 *dst6 = (struct sockaddr_in6 *)&conn_data->dst;
+      conn_data.src.ss_family = AF_INET6;
+      conn_data.dst.ss_family = AF_INET6;
+      struct sockaddr_in6 *src6 = (struct sockaddr_in6 *)&conn_data.src;
+      struct sockaddr_in6 *dst6 = (struct sockaddr_in6 *)&conn_data.dst;
       memcpy(&src6->sin6_addr.s6_addr,
              nfct_get_attr(ct, ATTR_IPV6_SRC),
              sizeof(uint32_t) * 4);
@@ -745,20 +767,16 @@ vmw_net_conntrack_callback(enum nf_conntrack_msg_type type,
    }
 
    if (TCP_CONNTRACK_ESTABLISHED == state) {
-      conn_data->event_type = POSTCONNECT;
+      conn_data.event_type = POSTCONNECT;
    } else {
-      conn_data->event_type = DISCONNECT;
+      conn_data.event_type = DISCONNECT;
    }
-   conn_data->event_id = 0;
+   conn_data.event_id = 0;
 
    /* Send the packet to client */
-   (void)vmw_client_notify(conn_data, sess, 0);
+   (void)vmw_client_notify(&conn_data, sess, 0);
 
 exit:
-   if (conn_data) {
-      free(conn_data);
-      conn_data = NULL;
-   }
    /* Break nfct_catch loop as process is being stopped */
    if (ATOMIC_OR(&g_need_to_quit, 0)) {
       return NFCT_CB_STOP;
@@ -875,7 +893,7 @@ vmw_net_queue_callback(struct nfq_q_handle *qh,
    struct ip6_hdr *ip6info = NULL;
    struct tcphdr *tcp_info = NULL;
    struct udphdr *udp_info = NULL;
-   struct vmw_conn_identity_data *conn_data = NULL;
+   struct vmw_conn_identity_data conn_data = { 0 };
    struct vmw_net_session *sess = (struct vmw_net_session*)arg;
    int ret = -1;
    int status = 0;
@@ -883,18 +901,10 @@ vmw_net_queue_callback(struct nfq_q_handle *qh,
    unsigned char *data = NULL;
    uint32_t event_id;
    uint32_t packet_mark;
+   unsigned short hdrLen = 0;
 
    sess = vmw_net_sess_handle;
    if (!nfa|| !sess) {
-      ret = -1;
-      goto exit;
-   }
-
-   conn_data = (struct vmw_conn_identity_data *)
-           malloc(sizeof(struct vmw_conn_identity_data));
-   if (!conn_data) {
-      ERROR("Memory allocation failed for msg data");
-      status = ENOMEM;
       ret = -1;
       goto exit;
    }
@@ -906,7 +916,7 @@ vmw_net_queue_callback(struct nfq_q_handle *qh,
       event_id = ntohl(ph->packet_id);
       DEBUG("hw_protocol=0x%04x, hook=%u, id=%u", ntohs(ph->hw_protocol),
            ph->hook, event_id);
-      conn_data->event_id = event_id;
+      conn_data.event_id = event_id;
    }
 
    ret = nfq_get_payload(nfa, &data);
@@ -920,10 +930,10 @@ vmw_net_queue_callback(struct nfq_q_handle *qh,
    ipinfo = (struct iphdr *)data;
 
    if (IPVERSION == ipinfo->version) {
-      conn_data->src.ss_family = AF_INET;
-      conn_data->dst.ss_family = AF_INET;
-      struct sockaddr_in *src = (struct sockaddr_in *)&conn_data->src;
-      struct sockaddr_in *dst = (struct sockaddr_in *)&conn_data->dst;
+      conn_data.src.ss_family = AF_INET;
+      conn_data.dst.ss_family = AF_INET;
+      struct sockaddr_in *src = (struct sockaddr_in *)&conn_data.src;
+      struct sockaddr_in *dst = (struct sockaddr_in *)&conn_data.dst;
       src->sin_addr.s_addr = ipinfo->saddr;
       dst->sin_addr.s_addr = ipinfo->daddr;
 
@@ -937,20 +947,23 @@ vmw_net_queue_callback(struct nfq_q_handle *qh,
          udp_info = (struct udphdr *)(data + sizeof(*ipinfo));
          src->sin_port = ntohs(udp_info->source);
          dst->sin_port = ntohs(udp_info->dest);
+         if (src->sin_port == DNS_PORT) {
+            hdrLen = ntohs(udp_info->len);
+         }
       } else {
          INFO("Non tcp/ip traffic: %d, id=%u", ipinfo->protocol, event_id);
          ret = -1;
          goto exit;
       }
-      conn_data->protocol = ipinfo->protocol;
+      conn_data.protocol = ipinfo->protocol;
       vmw_log_ipv4_address((struct sockaddr_in *)src);
       vmw_log_ipv4_address((struct sockaddr_in *)dst);
    } else {
       ip6info = (struct ip6_hdr *)data;
-      conn_data->src.ss_family = AF_INET6;
-      conn_data->dst.ss_family = AF_INET6;
-      struct sockaddr_in6 *src6 = (struct sockaddr_in6 *)&(conn_data->src);
-      struct sockaddr_in6 *dst6 = (struct sockaddr_in6 *)&(conn_data->dst);
+      conn_data.src.ss_family = AF_INET6;
+      conn_data.dst.ss_family = AF_INET6;
+      struct sockaddr_in6 *src6 = (struct sockaddr_in6 *)&(conn_data.src);
+      struct sockaddr_in6 *dst6 = (struct sockaddr_in6 *)&(conn_data.dst);
 
       if (IPPROTO_TCP == ip6info->ip6_nxt) {
          tcp_info = (struct tcphdr *)(data + sizeof(*ip6info));
@@ -961,6 +974,9 @@ vmw_net_queue_callback(struct nfq_q_handle *qh,
          udp_info = (struct udphdr *)(data + sizeof(*ip6info));
          src6->sin6_port = ntohs(udp_info->source);
          dst6->sin6_port = ntohs(udp_info->dest);
+         if (src6->sin6_port == DNS_PORT) {
+            hdrLen = ntohs(udp_info->len);
+         }
       } else {
          INFO("Non tcp/ipv6 traffic: %d, id=%u", ip6info->ip6_nxt, event_id);
          ret = -1;
@@ -973,7 +989,7 @@ vmw_net_queue_callback(struct nfq_q_handle *qh,
              ip6info->ip6_dst.s6_addr,
              16);
 
-      conn_data->protocol = ip6info->ip6_nxt;
+      conn_data.protocol = ip6info->ip6_nxt;
    }
 
    event_type = get_event_type(nfa);
@@ -997,11 +1013,20 @@ vmw_net_queue_callback(struct nfq_q_handle *qh,
    /* Mark the packet with our mark */
    packet_mark = update_packet_mark(nfa);
 
-   conn_data->event_type = event_type;
-   conn_data->event_id = event_id;
+   conn_data.event_type = event_type;
+   conn_data.event_id = event_id;
 
+   if ( (event_type == INBOUND_PRECONNECT) && (hdrLen != 0) ) {
+      conn_data.dns_payload->len = hdrLen - sizeof(struct udphdr);
+      conn_data.dns_payload->payload = malloc(conn_data.dns_payload->len);
+      if (NULL != conn_data.dns_payload->payload) {
+         memcpy(conn_data.dns_payload->payload,
+               (void*)((unsigned long)udp_info + sizeof(struct udphdr)),
+               conn_data.dns_payload->len);
+      }
+   }
    /* Deliver packet to client */
-   ret = vmw_client_notify(conn_data, sess, packet_mark);
+   ret = vmw_client_notify(&conn_data, sess, packet_mark);
    if (ret <= 0) {
       goto exit;
    }
@@ -1010,6 +1035,10 @@ vmw_net_queue_callback(struct nfq_q_handle *qh,
           event_type, event_id);
 
 exit:
+   if (conn_data.dns_payload->payload != NULL) {
+      free(conn_data.dns_payload->payload);
+      conn_data.dns_payload->payload = NULL;
+   }
    /* If there are no clients connected ret = 0 */
    if (ret <= 0 && sess) {
       /*
@@ -1023,10 +1052,6 @@ exit:
                       packet_mark,
                       0,
                       NULL);
-   }
-
-   if (conn_data) {
-      free(conn_data);
    }
    return ret;
 }
@@ -1172,6 +1197,8 @@ vmw_init(void *arg)
    ATOMIC_OR(&g_vmw_init_done, 1);
    INFO("%s is running", PROG_NAME);
 
+   pthread_mutex_init(&clientUDSLock, NULL);
+
    ret = pthread_create(&client_msg_recv_thread,
                         NULL,
                         vmw_client_msg_recv,
@@ -1198,6 +1225,7 @@ vmw_init(void *arg)
 
 exit:
    vmw_net_cleanup(vmw_net_sess_handle);
+   pthread_mutex_destroy(&clientUDSLock);
 
    /* Free struct vmw_net_session */
    if (vmw_net_sess_handle) {
