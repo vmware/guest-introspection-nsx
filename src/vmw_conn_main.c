@@ -44,7 +44,7 @@
 #define VMW_PID_FILE "/var/run/vmw_conn_notify.pid"
 
 #define PROC_PATH_SIZE 256
-#define VMW_CONN_NOTIFY_VERSION "1.0.0"
+#define VMW_CONN_NOTIFY_VERSION "1.0.0.1"
 #define VMW_CONFIG_FILE "/etc/vmw_conn_notify/vmw_conn_notify.conf"
 #define VMW_CONFIG_GROUP_NAME "VMW_CONN_NOTIFY_CONFIG"
 
@@ -446,6 +446,96 @@ exit:
    return ret;
 }
 
+
+/*
+ * Trim the given string with the given delimiter. Allocates memory for
+ * New string.
+ * Returns - A trimmed string on success or NULL on failure
+ */
+char*
+vmw_string_trim(const char *str, int delim)
+{
+   char *nstr = NULL;
+   char *tmp = NULL;
+
+   /* sanity check */
+   if (!str) {
+      return NULL;
+   }
+
+   /* allocate memory and store base pointer */
+   tmp = nstr = strdup(str);
+
+   /* trim the string with given delimiter */
+   while (*str) {
+      if (*str != delim) {
+         *nstr++ = *str;
+      }
+      str++;
+   }
+
+   *nstr = '\0';
+   return tmp;
+}
+
+/*
+ * First do the handshake with the connected client exchange version
+ * and get the protocol from client.
+ */
+static int
+vmw_handshake_version(int new_socket, struct vmw_client_scope *client_ctx)
+{
+   int ret = 0;
+   uint32_t version = 0;
+   char *vers_str = NULL;
+   vmw_client_info client_info = { 0 };
+
+   /* get the client version and protocol infromation */
+   ret = recv(new_socket, (void *)&client_info, sizeof(vmw_client_info), 0);
+   if (ret <= 0) {
+      ERROR("Failed to complete connection with client socket %d, "
+            "error %s", new_socket, strerror(errno));
+      close(new_socket);
+      new_socket = -1;
+      /* The return value will be 0 when the peer
+       * has performed an orderly shutdown.
+       */
+      ret = -1;
+      goto exit;
+   }
+
+   /* trim the version for e.g. "1.0.0.1" -> 1001
+    * client may simply perform the integer comparison
+    * for e.g. 1002 >= 1001
+    */
+   vers_str = vmw_string_trim(VMW_CONN_NOTIFY_VERSION, '.');
+   if (vers_str) {
+      version = (uint32_t)atoi(vers_str);
+      free(vers_str);
+   }
+
+   /* send the current protocol/GI-NSX version to the client
+    * The version can be used to identify client verdict but currently
+    * it is not used.
+    */
+   send(new_socket, &version, sizeof(version), 0);
+
+   pthread_mutex_lock(&client_ctx->client_sock_lock);
+   client_ctx->client_version = client_info.version;
+   client_ctx->client_sockfd = new_socket;
+   client_ctx->client_proto_info = client_info.protocol;
+   pthread_mutex_unlock(&client_ctx->client_sock_lock);
+
+   /* everything is good! */
+   INFO("Adding client to the client connection list socket %d "
+        "version %x protocol %x",
+        new_socket, client_info.version, client_info.protocol);
+   ret = 0;
+
+exit:
+   return ret;
+}
+
 int
 main(int argc, char **argv) {
    struct sockaddr_un local, remote;
@@ -456,9 +546,7 @@ main(int argc, char **argv) {
    int i, maxfd;
    int dummy_value = 0, ret = 0;
    int sock = -1, new_socket = -1;
-   uint32_t version = 1;
    uint8_t new_client_connreq = 0;
-   vmw_client_info client_info = { 0 };
 
    /* Process command line options */
    if (vmw_process_option(argc, argv)) {
@@ -569,29 +657,16 @@ main(int argc, char **argv) {
          pthread_mutex_lock(&g_client_ctx[i].client_sock_lock);
          if (IS_CLIENT_FD_FREE(g_client_ctx[i])) {
             pthread_mutex_unlock(&g_client_ctx[i].client_sock_lock);
-            ret = recv(new_socket, (void *)&client_info, sizeof(vmw_client_info), 0);
-            if (ret <= 0) {
-               ERROR("Failed to complete connection with client socket %d, "
-                     "error %s", new_socket, strerror(errno));
-               close(new_socket);
-               new_socket = -1;
+
+            /* perform version handshake with client
+             * this function closes the given fd in erroneous case
+             */
+            ret = vmw_handshake_version(new_socket, &g_client_ctx[i]);
+            if (ret < 0) {
+               ERROR("Failed to complete connection with client socket %d",
+                     new_socket);
                break;
             }
-            /*
-             * The version can be used to identify client verdict but currenty
-             * it is not used.
-             * TODO: Send shim mark to client
-             */
-            send(new_socket, &version, sizeof(version), 0);
-
-            pthread_mutex_lock(&g_client_ctx[i].client_sock_lock);
-            g_client_ctx[i].client_version = client_info.version;
-            g_client_ctx[i].client_sockfd = new_socket;
-            g_client_ctx[i].client_proto_info = client_info.protocol;
-            pthread_mutex_unlock(&g_client_ctx[i].client_sock_lock);
-            INFO("Adding client to the list of connected client as socket %d "
-                 "at index %d version %x protocol %x",
-                 new_socket, i, client_info.version, client_info.protocol);
 
             /*
              * Send new client connection notification to vmw_client_msg_recv
