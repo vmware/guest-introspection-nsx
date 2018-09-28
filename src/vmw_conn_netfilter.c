@@ -121,23 +121,33 @@ vmw_match_protocols(struct vmw_client_scope client,
 {
    bool match = FALSE;
    switch (conn->protocol) {
-       case IPPROTO_TCP :
-       {
-          match = client.client_proto_info & TCP_SUPPORT ? TRUE :FALSE;
-          break;
-       }
-       case IPPROTO_UDP :
-       {
-          match = client.client_proto_info & UDP_SUPPORT ? TRUE : FALSE;
-          break;
-       }
-       default:
-       {
+      case IPPROTO_TCP:
+      {
+         if (OUTBOUND_PRECONNECT == conn->event_type) {
+            match = client.client_proto_info & TCP_OUT_PRE_CONN_SUPPORT ? TRUE : FALSE;
+         } else if (POSTCONNECT == conn->event_type) {
+            match = client.client_proto_info & TCP_EST_CONN_SUPPORT ? TRUE : FALSE;
+         } else if (DISCONNECT == conn->event_type) {
+            match = client.client_proto_info & TCP_CLOSE_CONN_SUPPORT ? TRUE : FALSE;
+         } else if (INBOUND_PRECONNECT == conn->event_type) {
+            match = client.client_proto_info & TCP_IN_PRE_CONN_SUPPORT ? TRUE : FALSE;
+         }
+         break;
+      }
+      case IPPROTO_UDP:
+      {
+         match = client.client_proto_info & UDP_SUPPORT ? TRUE : FALSE;
+         break;
+      }
+      default:
+      {
          ERROR("Protocol %d not handled", conn->protocol);
-       }
+      }
    }
    return match;
 }
+
+
 /*
  * Destructor for the value entry of global hash table
  */
@@ -518,7 +528,7 @@ vmw_conn_data_send(struct vmw_conn_identity_data *conn_data,
       if (conn_data->event_id &&
             !(vmw_match_protocols(g_client_ctx[i], conn_data))) {
          DEBUG("Protocol mismatch: client protocol %x packet prtocol %u",
-                  g_client_ctx[i].client_proto_info, conn_data->protocol);
+               g_client_ctx[i].client_proto_info, conn_data->protocol);
          pthread_mutex_unlock(&g_client_ctx[i].client_sock_lock);
          continue;
 
