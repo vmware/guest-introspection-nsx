@@ -28,7 +28,7 @@
 # Provides:             vmw_conn_notifyd
 # Required-Start:       $network $remote_fs $syslog $time
 # Required-Stop:        $network $remote_fs $syslog $time
-# Default-Start:        2 3 4 5
+# Default-Start:        2 3 5
 # Default-Stop:         0 1 6
 # Short-Description:    VMware Network Connection Introspection Service
 # Description:          Manages the service need to run Network Connecion Introspection
@@ -209,15 +209,19 @@ exec_or_warn() {
 # Load netfilter kernel modules
 load_netfilter_modules() {
    exec_or_die ${MODPROBE} iptable_filter
-   exec_or_die ${MODPROBE} ip6table_filter
+
    exec_or_die ${MODPROBE} xt_NFQUEUE
    exec_or_die ${MODPROBE} nf_conntrack_ipv4
-   exec_or_die ${MODPROBE} nf_conntrack_ipv6
+
+   if test -f /proc/net/if_inet6
+   then
+      exec_or_die ${MODPROBE} ip6table_filter
+      exec_or_die ${MODPROBE} nf_conntrack_ipv6
+   fi
 }
 
 add_vnetchain_filter_rules() {
    exec_or_die "${IPTABLES} -N ${VNET_CHAIN}"
-   exec_or_die "${IP6TABLES} -N ${VNET_CHAIN}"
 
    exec_or_die "${IPTABLES} -I INPUT ${VNET_PACKET_STAMP} \
                 ${TCP_PACKET_FILTER_OP} -j ${VNET_CHAIN}"
@@ -225,11 +229,18 @@ add_vnetchain_filter_rules() {
                 ${TCP_PACKET_FILTER_OP} -j ${VNET_CHAIN}"
    exec_or_die "${IPTABLES} -I ${VNET_CHAIN} -j ${NFQUEUE_BYPASS}"
 
-   exec_or_die "${IP6TABLES} -I INPUT ${VNET_PACKET_STAMP} \
-                ${TCP_PACKET_FILTER_OP} -j ${VNET_CHAIN}"
-   exec_or_die "${IP6TABLES} -I OUTPUT ${VNET_PACKET_STAMP} \
-                ${TCP_PACKET_FILTER_OP} -j ${VNET_CHAIN}"
-   exec_or_die "${IP6TABLES} -I ${VNET_CHAIN} -j ${NFQUEUE_BYPASS}"
+   #
+   # Add ipv6 rules only when ipv6 is supported on the system
+   #
+   if test -f /proc/net/if_inet6
+   then
+      exec_or_die "${IP6TABLES} -N ${VNET_CHAIN}"
+      exec_or_die "${IP6TABLES} -I INPUT ${VNET_PACKET_STAMP} \
+                   ${TCP_PACKET_FILTER_OP} -j ${VNET_CHAIN}"
+      exec_or_die "${IP6TABLES} -I OUTPUT ${VNET_PACKET_STAMP} \
+                   ${TCP_PACKET_FILTER_OP} -j ${VNET_CHAIN}"
+      exec_or_die "${IP6TABLES} -I ${VNET_CHAIN} -j ${NFQUEUE_BYPASS}"
+   fi
 }
 
 remove_vnetchain_filter_rules() {
@@ -239,14 +250,18 @@ remove_vnetchain_filter_rules() {
                  ${TCP_PACKET_FILTER_OP} -j ${VNET_CHAIN}"
    exec_or_warn "${IPTABLES} -D ${VNET_CHAIN} -j ${NFQUEUE_BYPASS}"
 
-   exec_or_warn "${IP6TABLES} -D INPUT ${VNET_PACKET_STAMP} \
-                 ${TCP_PACKET_FILTER_OP} -j ${VNET_CHAIN}"
-   exec_or_warn "${IP6TABLES} -D OUTPUT ${VNET_PACKET_STAMP} \
-                 ${TCP_PACKET_FILTER_OP} -j ${VNET_CHAIN}"
-   exec_or_warn "${IP6TABLES} -D ${VNET_CHAIN} -j ${NFQUEUE_BYPASS}"
 
    exec_or_warn "${IPTABLES} -X ${VNET_CHAIN}"
-   exec_or_warn "${IP6TABLES} -X ${VNET_CHAIN}"
+
+   if test -f /proc/net/if_inet6
+   then
+      exec_or_warn "${IP6TABLES} -D INPUT ${VNET_PACKET_STAMP} \
+                   ${TCP_PACKET_FILTER_OP} -j ${VNET_CHAIN}"
+      exec_or_warn "${IP6TABLES} -D OUTPUT ${VNET_PACKET_STAMP} \
+                    ${TCP_PACKET_FILTER_OP} -j ${VNET_CHAIN}"
+      exec_or_warn "${IP6TABLES} -D ${VNET_CHAIN} -j ${NFQUEUE_BYPASS}"
+      exec_or_warn "${IP6TABLES} -X ${VNET_CHAIN}"
+   fi
 }
 
 if [ "`id -u`" -ne 0 ] ; then
@@ -340,10 +355,16 @@ start () {
    if [ "$retval_watchdog" -ne "$GM_SUCCESS" ]; then
       vmw_logger "Starting watchdog for $VMW_CONN_NOTIFY_NAME" $SILENT $INFO
       start_watchdog
+      status_watchdog
+      retval_watchdog=$?
+   fi
+
+   if [ "$retval_watchdog" -ne "$GM_SUCCESS" ]; then
       sleep 1
       status_watchdog
       retval_watchdog=$?
    fi
+
    # Display results for watchdog
    if [ "$retval_watchdog" -ne "$GM_SUCCESS" ]; then
       retval_watchdog="$GM_FAIL"
@@ -387,8 +408,7 @@ stop() {
    retval_watchdog=$?
    if [ "$retval_watchdog" -eq "$GM_SUCCESS" ]; then
       vmw_logger "Stopping $VMW_CONN_NOTIFY_WATCHDOG_NAME for vmw_conn_notify" $SILENT $SUCCESS
-      kill -SIGTERM `pgrep -f $VMW_CONN_NOTIFY_WATCHDOG_NAME`
-      sleep 1
+      kill -SIGKILL `pgrep -f $VMW_CONN_NOTIFY_WATCHDOG_NAME` >/dev/null 2>&1
       status_watchdog
       retval_watchdog=$?
    fi
@@ -400,14 +420,11 @@ stop() {
       vmw_logger "Failed to stop $VMW_CONN_NOTIFY_WATCHDOG_NAME" $SILENT $ERROR
    fi
 
-   ### sleep for few seconds, wait for watchdog to stop
-   sleep $VMW_CONN_NOTIFY_STOP_TIME
-
    status_vmw_conn_notify
    retval_vmw_conn_notify=$?
    if [ "$retval_vmw_conn_notify" -eq "$GM_SUCCESS" ]; then
       vmw_logger "Stopping $VMW_CONN_NOTIFY_NAME binary" $SILENT $INFO
-      kill -SIGTERM `pidof $VMW_CONN_NOTIFY_NAME`
+      kill -SIGTERM `pidof $VMW_CONN_NOTIFY_NAME` >/dev/null 2>&1
       sleep 1
       status_vmw_conn_notify
       retval_vmw_conn_notify=$?
@@ -416,8 +433,6 @@ stop() {
    if [ "$retval_vmw_conn_notify" -ne "$GM_SUCCESS" ]; then
       retval_vmw_conn_notify="$GM_SUCCESS"
       rm -f $LOCK_FILE
-      ### sleep for few seconds, wait for thin-agent to stop
-      sleep $VMW_CONN_NOTIFY_STOP_TIME
       vmw_logger "$VMW_CONN_NOTIFY_NAME binary stopped successfully" $SILENT $SUCCESS
    else
       retval_vmw_conn_notify="$GM_FAIL"
@@ -502,7 +517,6 @@ case "$1" in
    restart|force-reload)
       stop $2
       # Sleep for few seconds for the MUX connection to get refreshed
-      sleep 3
       start $2
       ;;
    *)
