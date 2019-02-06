@@ -761,7 +761,7 @@ vmw_net_conntrack_callback(enum nf_conntrack_msg_type type,
       conn_data->event_type = DISCONNECT;
    }
    conn_data->event_id = 0;
-   conn_data.protocol = nfct_get_attr_u8(ct, ATTR_L4PROTO);
+   conn_data->protocol = nfct_get_attr_u8(ct, ATTR_L4PROTO);
    /* Send the packet to client */
    (void)vmw_client_notify(conn_data, sess, 0);
 
