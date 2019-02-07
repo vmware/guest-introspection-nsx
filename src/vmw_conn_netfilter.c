@@ -468,7 +468,6 @@ vmw_client_msg_recv(void *arg)
       }
    }
 
-exit:
    return NULL;
 }
 
@@ -478,11 +477,8 @@ vmw_conn_data_send(struct vmw_conn_identity_data *conn_data,
                    uint32_t packet_mark)
 {
    global_packet_info *global_packet = NULL;
-   gpointer key;
-   gpointer value = NULL;
    int i, sd;
    int ret = 0, refcnt = 0;
-   uint32_t mark = 0;
 
    /*
     * The event id of each contrack event is zero. The conntrack event
@@ -889,7 +885,6 @@ vmw_net_queue_callback(struct nfq_q_handle *qh,
    struct vmw_conn_identity_data *conn_data = NULL;
    struct vmw_net_session *sess = (struct vmw_net_session*)arg;
    int ret = -1;
-   int status = 0;
    enum vmw_conn_event_type event_type = 0;
    unsigned char *data = NULL;
    uint32_t event_id;
@@ -905,7 +900,6 @@ vmw_net_queue_callback(struct nfq_q_handle *qh,
            malloc(sizeof(struct vmw_conn_identity_data));
    if (!conn_data) {
       ERROR("Memory allocation failed for msg data");
-      status = ENOMEM;
       ret = -1;
       goto exit;
    }
