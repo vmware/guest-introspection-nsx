@@ -78,8 +78,11 @@
  * interested in. These macros indicate how the bits in the 'protocol'
  * field of vmw_client_info are interpreted.
  */
-#define TCP_SUPPORT 1<<0
-#define UDP_SUPPORT 1<<1
+#define TCP_OUT_PRE_CONN_SUPPORT 1<<0
+#define TCP_IN_PRE_CONN_SUPPORT  1<<1
+#define TCP_EST_CONN_SUPPORT     1<<2
+#define TCP_CLOSE_CONN_SUPPORT   1<<3
+#define UDP_SUPPORT              1<<4
 
 /* Network event Type */
 enum vmw_conn_event_type {
