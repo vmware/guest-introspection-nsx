@@ -141,7 +141,8 @@ vmw_match_protocols(struct vmw_client_scope client,
       }
       default:
       {
-         ERROR("Protocol %d not handled", conn->protocol);
+         ERROR("Protocol %d not handled packet id %d event type %x",
+               conn->protocol, conn->event_id, conn->event_type);
       }
    }
    return match;
@@ -525,10 +526,10 @@ vmw_conn_data_send(struct vmw_conn_identity_data *conn_data,
          pthread_mutex_unlock(&g_client_ctx[i].client_sock_lock);
          continue;
       }
-      if (conn_data->event_id &&
-            !(vmw_match_protocols(g_client_ctx[i], conn_data))) {
-         DEBUG("Protocol mismatch: client protocol %x packet prtocol %u",
-               g_client_ctx[i].client_proto_info, conn_data->protocol);
+      if (FALSE == vmw_match_protocols(g_client_ctx[i], conn_data)) {
+         DEBUG("Protocol mismatch: client protocol %x packet prtocol %u "
+               "packet id %d event type %x", g_client_ctx[i].client_proto_info,
+               conn_data->protocol, conn_data->event_id, conn_data->event_type);
          pthread_mutex_unlock(&g_client_ctx[i].client_sock_lock);
          continue;
 
@@ -760,7 +761,7 @@ vmw_net_conntrack_callback(enum nf_conntrack_msg_type type,
       conn_data->event_type = DISCONNECT;
    }
    conn_data->event_id = 0;
-
+   conn_data->protocol = nfct_get_attr_u8(ct, ATTR_L4PROTO);
    /* Send the packet to client */
    (void)vmw_client_notify(conn_data, sess, 0);
 
