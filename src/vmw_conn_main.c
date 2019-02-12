@@ -44,18 +44,22 @@
 #define VMW_PID_FILE "/var/run/vmw_conn_notify.pid"
 
 #define PROC_PATH_SIZE 256
-#define VMW_CONN_NOTIFY_VERSION "1.0.0"
+#define VMW_CONN_NOTIFY_VERSION "1.0.0.1"
 #define VMW_CONFIG_FILE "/etc/vmw_conn_notify/vmw_conn_notify.conf"
 #define VMW_CONFIG_GROUP_NAME "VMW_CONN_NOTIFY_CONFIG"
 
 extern volatile int g_vmw_init_done;
 extern void *vmw_init(void *);
-
+extern void cleanup_client_hash_entry(gpointer data);
+extern void cleanup_global_hash_entry(gpointer data);
 /* Global client context array */
 struct vmw_client_scope g_client_ctx[MAX_CLIENTS];
 
 /* Global variable to indicate process termintation/shutdown event */
 volatile int g_need_to_quit  = 0;
+
+/* Global hash table to store packets queued for verdict */
+GHashTable *global_queued_pkthash;
 
 /*
  * Array of FDs  to break select() in case of shutdown event or new client
@@ -442,6 +446,96 @@ exit:
    return ret;
 }
 
+
+/*
+ * Trim the given string with the given delimiter. Allocates memory for
+ * New string.
+ * Returns - A trimmed string on success or NULL on failure
+ */
+char*
+vmw_string_trim(const char *str, int delim)
+{
+   char *nstr = NULL;
+   char *tmp = NULL;
+
+   /* sanity check */
+   if (!str) {
+      return NULL;
+   }
+
+   /* allocate memory and store base pointer */
+   tmp = nstr = strdup(str);
+
+   /* trim the string with given delimiter */
+   while (*str) {
+      if (*str != delim) {
+         *nstr++ = *str;
+      }
+      str++;
+   }
+
+   *nstr = '\0';
+   return tmp;
+}
+
+/*
+ * First do the handshake with the connected client exchange version
+ * and get the protocol from client.
+ */
+static int
+vmw_handshake_version(int new_socket, struct vmw_client_scope *client_ctx)
+{
+   int ret = 0;
+   uint32_t version = 0;
+   char *vers_str = NULL;
+   vmw_client_info client_info = { 0 };
+
+   /* get the client version and protocol infromation */
+   ret = recv(new_socket, (void *)&client_info, sizeof(vmw_client_info), 0);
+   if (ret <= 0) {
+      ERROR("Failed to complete connection with client socket %d, "
+            "error %s", new_socket, strerror(errno));
+      close(new_socket);
+      new_socket = -1;
+      /* The return value will be 0 when the peer
+       * has performed an orderly shutdown.
+       */
+      ret = -1;
+      goto exit;
+   }
+
+   /* trim the version for e.g. "1.0.0.1" -> 1001
+    * client may simply perform the integer comparison
+    * for e.g. 1002 >= 1001
+    */
+   vers_str = vmw_string_trim(VMW_CONN_NOTIFY_VERSION, '.');
+   if (vers_str) {
+      version = (uint32_t)atoi(vers_str);
+      free(vers_str);
+   }
+
+   /* send the current protocol/GI-NSX version to the client
+    * The version can be used to identify client verdict but currently
+    * it is not used.
+    */
+   send(new_socket, &version, sizeof(version), 0);
+
+   pthread_mutex_lock(&client_ctx->client_sock_lock);
+   client_ctx->client_version = client_info.version;
+   client_ctx->client_sockfd = new_socket;
+   client_ctx->client_proto_info = client_info.protocol;
+   pthread_mutex_unlock(&client_ctx->client_sock_lock);
+
+   /* everything is good! */
+   INFO("Adding client to the client connection list socket %d "
+        "version %x protocol %x",
+        new_socket, client_info.version, client_info.protocol);
+   ret = 0;
+
+exit:
+   return ret;
+}
+
 int
 main(int argc, char **argv) {
    struct sockaddr_un local, remote;
@@ -452,12 +546,16 @@ main(int argc, char **argv) {
    int i, maxfd;
    int dummy_value = 0, ret = 0;
    int sock = -1, new_socket = -1;
-   uint32_t version = 1;
    uint8_t new_client_connreq = 0;
 
    /* Process command line options */
    if (vmw_process_option(argc, argv)) {
       ret = 1;
+      goto exit;
+   }
+
+   if (version_flag) {
+      ret = 0;
       goto exit;
    }
 
@@ -505,11 +603,16 @@ main(int argc, char **argv) {
    master = readfds;
    maxfd = sock;
 
+   global_queued_pkthash = g_hash_table_new_full(g_direct_hash,
+                                                 g_direct_equal,
+                                                 NULL,
+                                                 cleanup_global_hash_entry);
    for (i = 0; i < MAX_CLIENTS; i++) {
       /*
        * Create per client  hash table for keeping record of packets which are
        * delivered to the client and verdict yet to be receivied for them.
        */
+      g_client_ctx[i].client_sockfd = -1;
       g_client_ctx[i].queued_pkthash = g_hash_table_new(g_direct_hash,
                                                         g_direct_equal);
       pthread_mutex_init(&g_client_ctx[i].client_sock_lock, NULL);
@@ -545,34 +648,25 @@ main(int argc, char **argv) {
       if (-1 == new_socket) {
          ERROR("bind() failed with error %s", strerror(errno));
          ret = new_socket;
-         goto exit;
+         ret = -1;
+         goto cleanup;
       }
 
       INFO("Connection from client socket %d is recevied", new_socket);
       for (i = 0; i < MAX_CLIENTS; i++) {
          pthread_mutex_lock(&g_client_ctx[i].client_sock_lock);
-         if (g_client_ctx[i].client_sockfd <= 0 &&
-             !g_client_ctx[i].pkthash_cleanup_wait) {
+         if (IS_CLIENT_FD_FREE(g_client_ctx[i])) {
             pthread_mutex_unlock(&g_client_ctx[i].client_sock_lock);
-            ret = recv(new_socket, (void *)&version, sizeof(version), 0);
-            if (ret <= 0) {
-               ERROR("Failed to complete connection with client socket %d, "
-                     "error %s", new_socket, strerror(errno));
-               close(new_socket);
-               new_socket = -1;
+
+            /* perform version handshake with client
+             * this function closes the given fd in erroneous case
+             */
+            ret = vmw_handshake_version(new_socket, &g_client_ctx[i]);
+            if (ret < 0) {
+               ERROR("Failed to complete connection with client socket %d",
+                     new_socket);
                break;
             }
-            /*
-             * The version can be used to identify client verdict but currenty
-             * it is not used.
-             */
-            pthread_mutex_lock(&g_client_ctx[i].client_sock_lock);
-            g_client_ctx[i].client_version = version;
-            g_client_ctx[i].client_sockfd = new_socket;
-            pthread_mutex_unlock(&g_client_ctx[i].client_sock_lock);
-            INFO("Adding client to the list of connected client as "
-                 "socket %d at index %d version %x", new_socket, i,
-                 version);
 
             /*
              * Send new client connection notification to vmw_client_msg_recv
@@ -603,6 +697,7 @@ main(int argc, char **argv) {
       pthread_join(init_thread, NULL);
    }
 
+cleanup:
    for (i = 0; i < MAX_CLIENTS; i++) {
       if (g_client_ctx[i].client_sockfd > 0) {
          close(g_client_ctx[i].client_sockfd);
@@ -611,14 +706,15 @@ main(int argc, char **argv) {
       g_hash_table_remove_all(g_client_ctx[i].queued_pkthash);
       g_hash_table_destroy(g_client_ctx[i].queued_pkthash);
    }
+   g_hash_table_remove_all(global_queued_pkthash);
+   g_hash_table_destroy(global_queued_pkthash);
 
+   closelog();
+   unlink(VMW_PID_FILE);
+
+exit:
    if (sock > 0) {
       close(sock);
    }
-   closelog();
-   unlink(VMW_PID_FILE);
-   ret = 0;
-
-exit:
    return ret;
 }

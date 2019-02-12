@@ -50,6 +50,7 @@
 #include <arpa/inet.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
+#include <netinet/udp.h>
 #include <netinet/ip.h>
 #include <netinet/ip6.h>
 
@@ -70,10 +71,20 @@
 #define PROG_NAME "vmw_conn_notfiy"
 
 /* Maximum number of supported client */
-#define MAX_CLIENTS 1
+#define MAX_CLIENTS 2
 
+/*
+ * Client will register with vmw_conn_notify for protocols they are
+ * interested in. These macros indicate how the bits in the 'protocol'
+ * field of vmw_client_info are interpreted.
+ */
+#define TCP_OUT_PRE_CONN_SUPPORT 1<<0
+#define TCP_IN_PRE_CONN_SUPPORT  1<<1
+#define TCP_EST_CONN_SUPPORT     1<<2
+#define TCP_CLOSE_CONN_SUPPORT   1<<3
+#define UDP_SUPPORT              1<<4
 
-/* Network event Tyoe */
+/* Network event Type */
 enum vmw_conn_event_type {
    OUTBOUND_PRECONNECT = 1,            /* Outgoing connection initiation*/
    POSTCONNECT,                        /* Established connection */
@@ -88,6 +99,7 @@ struct vmw_conn_identity_data {
    struct sockaddr_storage dst;           /* Destination ip */
    enum vmw_conn_event_type event_type;   /* Network connection type */
    uint32_t event_id;                     /* Event id */
+   uint8_t protocol;                      /* L3 protocol */
 };
 
 struct vmw_client_scope {
@@ -96,7 +108,33 @@ struct vmw_client_scope {
    int client_version;                 /* Client version */
    GHashTable *queued_pkthash;         /* Hash table to store packets queued for
                                         verdict */
-   uint8_t pkthash_cleanup_wait;       /* Wait for completion of on-going
-                                          pkthash clean */
+   uint8_t pkthash_cleanup_wait;       /* Client hashtable cleanup in progress*/
+   uint32_t client_proto_info;         /* Protocol info for which client is
+                                        interested */
 };
+
+/* Client fd in cleanup is not considered a free fd */
+#define IS_CLIENT_FD_FREE(ctx)   \
+   ((ctx.client_sockfd < 0) && (!ctx.pkthash_cleanup_wait))
+
+/* Packet info maintained in the global hash table */
+typedef struct _vmw_global_packet_info {
+   uint32_t event_id;                    /* Id information per packet */
+   uint32_t ref_count;              /* Number of client referring to packet */
+   uint32_t mark;                   /* Mark to be set on the packet */
+   pthread_mutex_t lock;            /* lock protecting this structure */
+} global_packet_info;
+
+/* Packet info from client */
+typedef struct _vmw_verdict {
+   uint32_t packetId;                    /* packet tracking id for client */
+   int verdict;                     /* verdict received from client */
+} vmw_verdict;
+
+/* version and mark info per client */
+typedef struct _vmw_client_info {
+   int version;                     /* Client version */
+   uint32_t protocol;               /* Protocol events for which client is
+                                       interested */
+} vmw_client_info;
 #endif
