@@ -44,7 +44,7 @@
 #define VMW_PID_FILE "/var/run/vmw_conn_notify.pid"
 
 #define PROC_PATH_SIZE 256
-#define VMW_CONN_NOTIFY_VERSION "1.0.0.1"
+
 #define VMW_CONFIG_FILE "/etc/vmw_conn_notify/vmw_conn_notify.conf"
 #define VMW_CONFIG_GROUP_NAME "VMW_CONN_NOTIFY_CONFIG"
 
@@ -408,7 +408,8 @@ vmw_process_option(int argc, char **argv)
    get_opt(argc, argv);
 
    if (version_flag) {
-      fprintf(stdout, "%s version :\t%s\n", PROG_NAME, VMW_CONN_NOTIFY_VERSION);
+      fprintf(stdout, "%s version :\t%u.%u.%u.%u\n", PROG_NAME,
+         VERSION_MAJOR, VERSION_MINOR, VERSION_BUILD, VERSION_REVISION);
       goto exit;
    }
 
@@ -448,46 +449,32 @@ exit:
 
 
 /*
- * Trim the given string with the given delimiter. Allocates memory for
- * New string.
- * Returns - A trimmed string on success or NULL on failure
+ * Pack the version into 32 bit integer keeping one byte for each field.
+ * Client may simply perform the integer comparison
+ * for example 0x1002 >= 0x1001
+ * Returns the 32 bit version.
  */
-char*
-vmw_string_trim(const char *str, int delim)
+static uint32_t
+vmw_pack_version()
 {
-   char *nstr = NULL;
-   char *tmp = NULL;
-
-   /* sanity check */
-   if (!str) {
-      return NULL;
-   }
-
-   /* allocate memory and store base pointer */
-   tmp = nstr = strdup(str);
-
-   /* trim the string with given delimiter */
-   while (*str) {
-      if (*str != delim) {
-         *nstr++ = *str;
-      }
-      str++;
-   }
-
-   *nstr = '\0';
-   return tmp;
+   char ver[64];
+   uint32_t version = (VERSION_MAJOR << 24 | VERSION_MINOR << 16 | \
+      VERSION_BUILD << 8 | VERSION_REVISION);
+   snprintf(ver, 64, "%u.%u.%u.%u", VERSION_MAJOR, VERSION_MINOR,
+      VERSION_BUILD, VERSION_REVISION);
+   INFO("%s protocol version %s 0x%x", PROG_NAME, ver, version);
+   return version;
 }
 
 /*
- * First do the handshake with the connected client exchange version
- * and get the protocol from client.
+ * First do the handshake with the connected client.
+ * Exchange version and get the protocol from client.
  */
 static int
 vmw_handshake_version(int new_socket, struct vmw_client_scope *client_ctx)
 {
    int ret = 0;
    uint32_t version = 0;
-   char *vers_str = NULL;
    vmw_client_info client_info = { 0 };
 
    /* get the client version and protocol infromation */
@@ -504,15 +491,8 @@ vmw_handshake_version(int new_socket, struct vmw_client_scope *client_ctx)
       goto exit;
    }
 
-   /* trim the version for e.g. "1.0.0.1" -> 1001
-    * client may simply perform the integer comparison
-    * for e.g. 1002 >= 1001
-    */
-   vers_str = vmw_string_trim(VMW_CONN_NOTIFY_VERSION, '.');
-   if (vers_str) {
-      version = (uint32_t)atoi(vers_str);
-      free(vers_str);
-   }
+   /* get packed version */
+   version = vmw_pack_version();
 
    /* send the current protocol/GI-NSX version to the client
     * The version can be used to identify client verdict but currently
