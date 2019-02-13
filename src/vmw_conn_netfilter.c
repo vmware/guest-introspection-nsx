@@ -58,6 +58,7 @@
 #define VMW_LOOPBACK_ADDRESS "127.0.0.1"
 #define VMW_LOOPBACK_MASK 0xffffffff
 
+
 /*
  * A wrapper structure to keep netfilter queue handle and FD for getting
  * packets from queue library/kernel module.
@@ -91,18 +92,89 @@ struct vmw_net_session {
 struct vmw_net_session *vmw_net_sess_handle;
 
 /*
- * GLobal variable indicates inidicates completion of all necessary
- * initialisation
+ * Global lock to protect concurrent updates and lookups of the global
+ * hashtable
+ */
+pthread_mutex_t global_pkthash_lock  = PTHREAD_MUTEX_INITIALIZER;
+
+/*
+ * Global variable indicates completion of all necessary
+ * initialization
  */
 volatile int g_vmw_init_done = 0;
 
 extern struct vmw_client_scope g_client_ctx[MAX_CLIENTS];
+extern GHashTable *global_queued_pkthash;
 extern volatile int g_need_to_quit;
 
 extern int
 vmw_wait_for_event(int, fd_set *, uint8_t);
 extern void
 vmw_notify_exit();
+
+/*
+ * Check if the client registered protocol and packet protocol matches
+ */
+static inline bool
+vmw_match_protocols(struct vmw_client_scope client,
+                    struct vmw_conn_identity_data *conn)
+{
+   bool match = FALSE;
+   switch (conn->protocol) {
+      case IPPROTO_TCP:
+      {
+         if (OUTBOUND_PRECONNECT == conn->event_type) {
+            match = client.client_proto_info & TCP_OUT_PRE_CONN_SUPPORT ? TRUE : FALSE;
+         } else if (POSTCONNECT == conn->event_type) {
+            match = client.client_proto_info & TCP_EST_CONN_SUPPORT ? TRUE : FALSE;
+         } else if (DISCONNECT == conn->event_type) {
+            match = client.client_proto_info & TCP_CLOSE_CONN_SUPPORT ? TRUE : FALSE;
+         } else if (INBOUND_PRECONNECT == conn->event_type) {
+            match = client.client_proto_info & TCP_IN_PRE_CONN_SUPPORT ? TRUE : FALSE;
+         }
+         break;
+      }
+      case IPPROTO_UDP:
+      {
+         match = client.client_proto_info & UDP_SUPPORT ? TRUE : FALSE;
+         break;
+      }
+      default:
+      {
+         ERROR("Protocol %d not handled packet id %d event type %x",
+               conn->protocol, conn->event_id, conn->event_type);
+      }
+   }
+   return match;
+}
+
+
+/*
+ * Destructor for the value entry of global hash table
+ */
+void
+cleanup_global_hash_entry(gpointer data)
+{
+   global_packet_info *packet = NULL;
+   if (data) {
+      packet = (global_packet_info *)data;
+      pthread_mutex_destroy(&packet->lock);
+      DEBUG("Cleaning packet data with eventid %d from global hash table",
+            packet->event_id);
+      free(data);
+      data = NULL;
+   }
+}
+
+/*
+ * Preserve the existing mark of packet and append it with
+ * vmw_notifier mark
+ */
+uint32_t
+update_packet_mark(struct nfq_data *nfad)
+{
+   return nfq_get_nfmark(nfad) | VMW_NFQ_PKT_MARK;
+}
 
 /* Log ipv4 address */
 void
@@ -196,12 +268,74 @@ exit:
    return ret;
 }
 
+void
+vmw_process_global_packet(uint32_t event_id,
+                          int verdict,
+                          struct vmw_net_session *sess)
+{
+   global_packet_info *global_packet = NULL;
+   gpointer gkey = NULL;
+   gpointer gvalue = NULL;
+   uint32_t mark;
+
+   pthread_mutex_lock(&global_pkthash_lock);
+   g_hash_table_lookup_extended(global_queued_pkthash,
+                                GUINT_TO_POINTER(event_id),
+                                &gkey,
+                                &gvalue);
+   pthread_mutex_unlock(&global_pkthash_lock);
+
+   if (gvalue == NULL) {
+      return;
+   }
+   global_packet = (global_packet_info*) gvalue;
+   /*
+    * To prevent races with conn_data_send, take the packet
+    * lock. This ensures the first recv for a packet is not
+    * processed till all clients have been sent the packet.
+    */
+   pthread_mutex_lock(&global_packet->lock);
+
+   /*
+    * Verdict is sent either when the packet reference count is one
+    * or when verdict of any client is NF_DROP
+    */
+   if ((1 == global_packet->ref_count) ||
+       (verdict == NF_DROP)) {
+      mark = global_packet->mark;
+      pthread_mutex_unlock(&global_packet->lock);
+
+      pthread_mutex_lock(&global_pkthash_lock);
+      g_hash_table_remove(global_queued_pkthash,
+                          GUINT_TO_POINTER(event_id));
+      pthread_mutex_unlock(&global_pkthash_lock);
+
+      pthread_mutex_lock(&sess->queue_lock);
+      nfq_set_verdict2(sess->queue_ctx.qhandle,
+                       event_id,
+                       verdict,
+                       mark,
+                       0,
+                       NULL);
+      pthread_mutex_unlock(&sess->queue_lock);
+   } else {
+      /*
+       * Don't send verdict as this packet is being processed by other
+       * client, just reduce reference count in the global packet hash
+       * table
+       */
+      global_packet->ref_count--;
+      pthread_mutex_unlock(&global_packet->lock);
+   }
+   return;
+}
+
 /*
  * Release packet queued in netfilter NFQUEUE. This is called during client
  * disconnect.
  * Per client queued_pkthash contains packets that are delivered to the client
  * but response for them has not been come yet from the client so during
- * client disconnect, vedict for these packets are send to netfliter
+ * client disconnect, verdict for these packets are send to netfilter
  * library. On getting the verdict, netfilter library clears in-kernel data
  * structure for the packets.
  */
@@ -217,22 +351,46 @@ vmw_queued_pkthash_cleanup(struct vmw_net_session *sess,
    g_hash_table_iter_init(&iter, client_ptr->queued_pkthash);
    while (g_hash_table_iter_next(&iter, &key,  &value)) {
       event_id = GPOINTER_TO_UINT(key);
-      pthread_mutex_lock(&sess->queue_lock);
+      if (!value) {
+         continue;
+      }
+      vmw_process_global_packet(event_id, NF_REPEAT, sess);
 
-      /*
-       * Issue NF_ACCEPT verdict so that next rule in the chain can be applied
-       * to the packet.
-       */
-      nfq_set_verdict2(sess->queue_ctx.qhandle,
-                      event_id,
-                      NF_REPEAT,
-                      VMW_NFQ_PKT_MARK,
-                      0,
-                      NULL);
-      pthread_mutex_unlock(&sess->queue_lock);
       g_hash_table_iter_remove(&iter);
    }
 
+   return;
+}
+
+/* A client has disconnected, cleanup all related data structures */
+void
+vmw_client_cleanup(struct vmw_net_session *sess, int idx)
+{
+   int sd = 0;
+
+   pthread_mutex_lock(&g_client_ctx[idx].client_sock_lock);
+   sd = g_client_ctx[idx].client_sockfd;
+   close(g_client_ctx[idx].client_sockfd);
+   /*
+    * Invalidate fd so send() adds no more packets to the
+    * client hashtable
+    */
+   g_client_ctx[idx].client_sockfd = -1;
+   g_client_ctx[idx].pkthash_cleanup_wait = 1;
+   pthread_mutex_unlock(&g_client_ctx[idx].client_sock_lock);
+
+   /*
+    * Cleanup the client hashtable and references to this client
+    * in the global hashtable.
+    */
+   vmw_queued_pkthash_cleanup(sess, &g_client_ctx[idx]);
+
+   /* Cleanup completed, this index can be reused now */
+   pthread_mutex_lock(&g_client_ctx[idx].client_sock_lock);
+   g_client_ctx[idx].pkthash_cleanup_wait = 0;
+   pthread_mutex_unlock(&g_client_ctx[idx].client_sock_lock);
+
+   WARN("Client %d disconnected", sd);
    return;
 }
 
@@ -241,78 +399,71 @@ void *
 vmw_client_msg_recv(void *arg)
 {
    struct vmw_net_session *sess = (struct vmw_net_session *)arg;
-   fd_set readfds;
+   vmw_verdict client_verdict = { 0 };
+   fd_set client_fds;
    int sd, max_sd, i, activity, ret;
-   uint32_t event_id;
-   uint8_t new_client_connreq = 1;
 
-   while(1) {
+   while (1) {
       if (ATOMIC_OR(&g_need_to_quit, 0)) {
          break;
       }
-
+      /*
+       * Only this thread frees client related
+       * data structures so no need to hold a client_sock_lock
+       */
       max_sd = 0;
-      FD_ZERO(&readfds);
-      for ( i = 0 ; i < MAX_CLIENTS; i++) {
-           sd = g_client_ctx[i].client_sockfd;
-           if(sd > 0) {
-               FD_SET(sd, &readfds);
-               if(sd > max_sd) {
-                  max_sd = sd;
-               }
+      FD_ZERO(&client_fds);
+      for (i = 0 ; i < MAX_CLIENTS; i++) {
+         sd = g_client_ctx[i].client_sockfd;
+         if (sd > 0) {
+            FD_SET(sd, &client_fds);
+            if (sd > max_sd) {
+               max_sd = sd;
             }
+         }
       }
-
-      /* vmw_wait_for_event() returns when
+      /*
+       * vmw_wait_for_event() returns when
        * 1. graceful shutdown is initiated;
        * 2. client response is received for the packet delivered earlier;
        * 3. new client connection is formed or an established client connection
        * is disconnected.
        */
-      activity = vmw_wait_for_event(max_sd, &readfds, new_client_connreq);
-      if ((activity < 0))  {
+      activity = vmw_wait_for_event(max_sd, &client_fds, 1);
+      if (activity <= 0)  {
            continue;
-      } else if (0 == activity) {
-         continue;
       }
-
       for (i = 0; i < MAX_CLIENTS; i++)  {
          sd = g_client_ctx[i].client_sockfd;
-         if (FD_ISSET(sd , &readfds)) {
-            ret = recv(sd, (void *)&event_id, sizeof(event_id), 0);
+         if (sd < 0) {
+            continue;
+         }
+         /* Data received or socket has been closed */
+         if (FD_ISSET(sd , &client_fds)) {
+            ret = recv(sd, (void *)&client_verdict, sizeof(client_verdict), 0);
             if (!ret) {
                /*
                 * Client got disconneted, so release packets queued in netfilter
                 * NFQUEUE.
                 */
-               pthread_mutex_lock(&g_client_ctx[i].client_sock_lock);
-               close(g_client_ctx[i].client_sockfd);
-               g_client_ctx[i].client_sockfd = -1;
-               g_client_ctx[i].pkthash_cleanup_wait = 1;
-               pthread_mutex_unlock(&g_client_ctx[i].client_sock_lock);
-               vmw_queued_pkthash_cleanup(sess, &g_client_ctx[i]);
-               pthread_mutex_lock(&g_client_ctx[i].client_sock_lock);
-               g_client_ctx[i].pkthash_cleanup_wait = 0;
-               pthread_mutex_unlock(&g_client_ctx[i].client_sock_lock);
-               WARN("The client %d got disconnected", sd);
+               vmw_client_cleanup(sess, i);
                continue;
             }
-
-            /* event_id is zero for conntrack related event */
-            if (!event_id) {
+            if (!client_verdict.packetId) {
                continue;
             }
+            if (client_verdict.verdict != NF_DROP) {
+               client_verdict.verdict = NF_REPEAT;
+            }
+            vmw_process_global_packet(client_verdict.packetId,
+                                      client_verdict.verdict,
+                                      sess);
 
+            pthread_mutex_lock(&g_client_ctx[i].client_sock_lock);
             g_hash_table_remove(g_client_ctx[i].queued_pkthash,
-                                GUINT_TO_POINTER(event_id));
-            pthread_mutex_lock(&sess->queue_lock);
-            nfq_set_verdict2(sess->queue_ctx.qhandle,
-                            event_id,
-                            NF_REPEAT,
-                            VMW_NFQ_PKT_MARK,
-                            0,
-                            NULL);
-            pthread_mutex_unlock(&sess->queue_lock);
+                                GUINT_TO_POINTER(client_verdict.packetId));
+            pthread_mutex_unlock(&g_client_ctx[i].client_sock_lock);
+
          }
       }
    }
@@ -322,53 +473,111 @@ vmw_client_msg_recv(void *arg)
 
 /* Deliver network event to the connected clients */
 int
-vmw_conn_data_send(struct vmw_conn_identity_data *conn_data)
+vmw_conn_data_send(struct vmw_conn_identity_data *conn_data,
+                   uint32_t packet_mark)
 {
+   global_packet_info *global_packet = NULL;
    int i, sd;
-   int ret = 0;
+   int ret = 0, refcnt = 0;
+
+   /*
+    * The event id of each contrack event is zero. The conntrack event
+    * is just a notification; there is no response required for the
+    * conntrack event.
+    */
+   if (conn_data->event_id) {
+      /*
+       * Init and add a global packet for this conn_data
+       * to the hashtable
+       */
+      global_packet = (global_packet_info *)
+               malloc(sizeof(global_packet_info));
+      if (NULL == global_packet) {
+         ret = -1;
+         ERROR("Failed to allocate global packet info");
+         goto exit;
+      }
+      global_packet->event_id = conn_data->event_id;
+      global_packet->ref_count = 0;
+      global_packet->mark = packet_mark;
+      pthread_mutex_init(&global_packet->lock, NULL);
+      pthread_mutex_lock(&global_pkthash_lock);
+      g_hash_table_replace(global_queued_pkthash,
+                           GUINT_TO_POINTER(conn_data->event_id),
+                           (gpointer)global_packet);
+      pthread_mutex_unlock(&global_pkthash_lock);
+      /*
+       * Need to hold the packet lock till we finish
+       * sending this packets to all clients. We don't want
+       * process the recv from a client till we have finished sending
+       * it to all clients as the race will make the refcounts
+       * go wrong.
+       */
+      pthread_mutex_lock(&global_packet->lock);
+   }
 
    for (i = 0; i < MAX_CLIENTS; i++)  {
       pthread_mutex_lock(&g_client_ctx[i].client_sock_lock);
-      sd = g_client_ctx[i].client_sockfd;
-      pthread_mutex_unlock(&g_client_ctx[i].client_sock_lock);
-      if (sd > 0) {
-         if (conn_data->event_id) {
-            /*
-             * Record event_id into queued_pkthash as client response is
-             * required for this event id.
-             *
-             * The event id of each contrack event is zero. The conntrack event
-             * is just a notification; there is no response required for the
-             * conntrack event.
+      if (g_client_ctx[i].client_sockfd < 0) {
+         pthread_mutex_unlock(&g_client_ctx[i].client_sock_lock);
+         continue;
+      }
+      if (FALSE == vmw_match_protocols(g_client_ctx[i], conn_data)) {
+         DEBUG("Protocol mismatch: client protocol %x packet prtocol %u "
+               "packet id %d event type %x", g_client_ctx[i].client_proto_info,
+               conn_data->protocol, conn_data->event_id, conn_data->event_type);
+         pthread_mutex_unlock(&g_client_ctx[i].client_sock_lock);
+         continue;
 
-             * The event id of each libnetfilter_queue is the packet id of
-             * the received packet and verdict for each packet is required. So
-             * in case of client termination, it is required to provide verdict
-             * for each packet id queued in the queued_pkthash.
-             */
-            g_hash_table_insert(g_client_ctx[i].queued_pkthash,
-                                GUINT_TO_POINTER(conn_data->event_id),
-                                NULL);
-         }
-         ret = send(sd, conn_data, sizeof(*conn_data), 0);
-         if (ret <= 0) {
-            ERROR("Could not send event %d to the client %d",
-                  conn_data->event_id, g_client_ctx[i].client_sockfd);
-            g_hash_table_remove(g_client_ctx[i].queued_pkthash,
-                                GUINT_TO_POINTER(conn_data->event_id));
-            goto exit;
-         }
+      }
+      sd = g_client_ctx[i].client_sockfd;
+
+      if (conn_data->event_id) {
+         g_hash_table_replace(g_client_ctx[i].queued_pkthash,
+                              GUINT_TO_POINTER(conn_data->event_id),
+                              NULL);
+      }
+      pthread_mutex_unlock(&g_client_ctx[i].client_sock_lock);
+
+      ret = send(sd, conn_data, sizeof(*conn_data), 0);
+      if (ret <= 0) {
+         ERROR("Could not send event %u to client %d (error %s)",
+               conn_data->event_id, sd, strerror(errno));
+         /* Cleanup will be done by recv */
+         continue;
+      }
+
+      /*
+       * Send message successfully to client, update the global
+       * packet, only if this is not a conntrack event.
+       */
+      if (conn_data->event_id) {
+         global_packet->ref_count++;
       }
    }
 
 exit:
+   if (global_packet) {
+      refcnt = global_packet->ref_count;
+      pthread_mutex_unlock(&global_packet->lock);
+      /*
+       * No clients were sent this packet, remove it from the hash
+       */
+      if (refcnt == 0) {
+         pthread_mutex_lock(&global_pkthash_lock);
+         g_hash_table_remove(global_queued_pkthash,
+                             GUINT_TO_POINTER(conn_data->event_id));
+         pthread_mutex_unlock(&global_pkthash_lock);
+      }
+   }
    return ret;
 }
 
 /* Log connection related data and sends the data to client */
 int
 vmw_client_notify(struct vmw_conn_identity_data *conn_data,
-                  struct vmw_net_session *sess)
+                  struct vmw_net_session *sess,
+                  uint32_t packet_mark)
 {
    int ret = -1;
 
@@ -388,7 +597,7 @@ vmw_client_notify(struct vmw_conn_identity_data *conn_data,
       goto exit;
    }
 
-   ret = vmw_conn_data_send(conn_data);
+   ret = vmw_conn_data_send(conn_data, packet_mark);
 
 exit:
    return ret;
@@ -403,10 +612,9 @@ vmw_netfilter_event_handler(void *arg)
 {
    char buf[VNET_BUFSIZE] __attribute__ ((aligned));
    struct vmw_net_session *sess = (struct vmw_net_session *)arg;
-   fd_set readfds, master;
    ssize_t bread = 0;
    int maxfd, status = 0;
-   int new_client_connreq = 0;
+   fd_set session_fds, master;
 
    if (!sess) {
       status = 1;
@@ -414,16 +622,14 @@ vmw_netfilter_event_handler(void *arg)
    }
 
    /* Clear the file descriptor set that to be monitored by select */
-   FD_ZERO(&readfds);
-
+   FD_ZERO(&session_fds);
    /* Add queue FD to FD set to be monitored by select for notificaton */
-   FD_SET(sess->queue_ctx.qfd, &readfds);
+   FD_SET(sess->queue_ctx.qfd, &session_fds);
    /* Add conntrack FD to FD set to be monitored by select for notificaton */
-   FD_SET(sess->conntrack_ctx.ctfd, &readfds);
+   FD_SET(sess->conntrack_ctx.ctfd, &session_fds);
 
-   master = readfds;
+   master = session_fds;
    maxfd = sess->conntrack_ctx.ctfd;
-
    /* Keep track of the biggest file descriptor */
    if (maxfd < sess->queue_ctx.qfd) {
       maxfd  = sess->queue_ctx.qfd;
@@ -438,9 +644,8 @@ vmw_netfilter_event_handler(void *arg)
        * Copy the master set back to readfds set so that both descriptors can be
        * monitored again for any notification
        */
-      readfds = master;
-      status = vmw_wait_for_event(maxfd, &readfds, new_client_connreq);
-
+      session_fds = master;
+      status = vmw_wait_for_event(maxfd, &session_fds, 0);
       /* select() is used to receive events from conntrack and nfqueue */
       if (-1 == status) {
          if (EINTR == errno) {
@@ -453,7 +658,7 @@ vmw_netfilter_event_handler(void *arg)
          continue;
       }
 
-      if (FD_ISSET(sess->queue_ctx.qfd, &readfds)) {
+      if (FD_ISSET(sess->queue_ctx.qfd, &session_fds)) {
          /* Read the packet from the netlink socket which is in NFQUEUE */
          bread = recv(sess->queue_ctx.qfd, buf, sizeof(buf), 0);
          if (bread > 0) {
@@ -472,7 +677,7 @@ vmw_netfilter_event_handler(void *arg)
          }
       }
 
-      if (FD_ISSET(sess->conntrack_ctx.ctfd, &readfds)) {
+      if (FD_ISSET(sess->conntrack_ctx.ctfd, &session_fds)) {
          /* Read connection state from kernel connection table */
          status = nfct_catch(sess->conntrack_ctx.cthandle);
       }
@@ -552,9 +757,9 @@ vmw_net_conntrack_callback(enum nf_conntrack_msg_type type,
       conn_data->event_type = DISCONNECT;
    }
    conn_data->event_id = 0;
-
+   conn_data->protocol = nfct_get_attr_u8(ct, ATTR_L4PROTO);
    /* Send the packet to client */
-   (void)vmw_client_notify(conn_data, sess);
+   (void)vmw_client_notify(conn_data, sess, 0);
 
 exit:
    if (conn_data) {
@@ -597,6 +802,7 @@ vmw_net_conntrack_init(void *arg)
    }
 
    nfct_filter_add_attr_u32(filter, NFCT_FILTER_L4PROTO, IPPROTO_TCP);
+   nfct_filter_add_attr_u32(filter, NFCT_FILTER_L4PROTO, IPPROTO_UDP);
 
    /* Instruct conntrack to deliver IPv4 events in host-byte order */
    struct nfct_filter_ipv4 filter_ipv4 = {
@@ -662,7 +868,7 @@ exit:
 }
 
 /*
- * A callback which gets invoked in the cotext of receiver thread from
+ * A callback which gets invoked in the context of receiver thread from
  * nfq_handle_packet function
  */
 static int
@@ -675,13 +881,14 @@ vmw_net_queue_callback(struct nfq_q_handle *qh,
    struct iphdr *ipinfo = NULL;
    struct ip6_hdr *ip6info = NULL;
    struct tcphdr *tcp_info = NULL;
+   struct udphdr *udp_info = NULL;
    struct vmw_conn_identity_data *conn_data = NULL;
    struct vmw_net_session *sess = (struct vmw_net_session*)arg;
    int ret = -1;
-   int status = 0;
    enum vmw_conn_event_type event_type = 0;
    unsigned char *data = NULL;
    uint32_t event_id;
+   uint32_t packet_mark;
 
    sess = vmw_net_sess_handle;
    if (!nfa|| !sess) {
@@ -693,7 +900,6 @@ vmw_net_queue_callback(struct nfq_q_handle *qh,
            malloc(sizeof(struct vmw_conn_identity_data));
    if (!conn_data) {
       ERROR("Memory allocation failed for msg data");
-      status = ENOMEM;
       ret = -1;
       goto exit;
    }
@@ -719,58 +925,71 @@ vmw_net_queue_callback(struct nfq_q_handle *qh,
    ipinfo = (struct iphdr *)data;
 
    if (IPVERSION == ipinfo->version) {
-      if (IPPROTO_TCP == ipinfo->protocol) {
-         conn_data->src.ss_family = AF_INET;
-         conn_data->dst.ss_family = AF_INET;
-         struct sockaddr_in *src = (struct sockaddr_in *)&conn_data->src;
-         struct sockaddr_in *dst = (struct sockaddr_in *)&conn_data->dst;
-         src->sin_addr.s_addr = ipinfo->saddr;
-         dst->sin_addr.s_addr = ipinfo->daddr;
+      conn_data->src.ss_family = AF_INET;
+      conn_data->dst.ss_family = AF_INET;
+      struct sockaddr_in *src = (struct sockaddr_in *)&conn_data->src;
+      struct sockaddr_in *dst = (struct sockaddr_in *)&conn_data->dst;
+      src->sin_addr.s_addr = ipinfo->saddr;
+      dst->sin_addr.s_addr = ipinfo->daddr;
 
+      if (IPPROTO_TCP == ipinfo->protocol) {
          /* Get the tcphdr from the payload */
          tcp_info = (struct tcphdr *)(data + sizeof(*ipinfo));
          src->sin_port = ntohs(tcp_info->source);
          dst->sin_port = ntohs(tcp_info->dest);
-         vmw_log_ipv4_address((struct sockaddr_in *)src);
-         vmw_log_ipv4_address((struct sockaddr_in *)dst);
-
+      } else if (IPPROTO_UDP == ipinfo->protocol) {
+         /* Get the tcphdr from the payload */
+         udp_info = (struct udphdr *)(data + sizeof(*ipinfo));
+         src->sin_port = ntohs(udp_info->source);
+         dst->sin_port = ntohs(udp_info->dest);
       } else {
          INFO("Non tcp/ip traffic: %d, id=%u", ipinfo->protocol, event_id);
          ret = -1;
          goto exit;
       }
+      conn_data->protocol = ipinfo->protocol;
+      vmw_log_ipv4_address((struct sockaddr_in *)src);
+      vmw_log_ipv4_address((struct sockaddr_in *)dst);
    } else {
       ip6info = (struct ip6_hdr *)data;
-      if (IPPROTO_TCP == ip6info->ip6_nxt) {
-         conn_data->src.ss_family = AF_INET6;
-         conn_data->dst.ss_family = AF_INET6;
-         struct sockaddr_in6 *src6 = (struct sockaddr_in6 *)&(conn_data->src);
-         struct sockaddr_in6 *dst6 = (struct sockaddr_in6 *)&(conn_data->dst);
+      conn_data->src.ss_family = AF_INET6;
+      conn_data->dst.ss_family = AF_INET6;
+      struct sockaddr_in6 *src6 = (struct sockaddr_in6 *)&(conn_data->src);
+      struct sockaddr_in6 *dst6 = (struct sockaddr_in6 *)&(conn_data->dst);
 
+      if (IPPROTO_TCP == ip6info->ip6_nxt) {
          tcp_info = (struct tcphdr *)(data + sizeof(*ip6info));
          src6->sin6_port = ntohs(tcp_info->source);
          dst6->sin6_port = ntohs(tcp_info->dest);
-         memcpy(src6->sin6_addr.s6_addr,
-                ip6info->ip6_src.s6_addr, 16);
-                //sizeof(src->sin6_addr.s6_addr));
-         memcpy(dst6->sin6_addr.s6_addr,
-                ip6info->ip6_dst.s6_addr,
-                16);
 
+      } else if (IPPROTO_UDP == ip6info->ip6_nxt) {
+         udp_info = (struct udphdr *)(data + sizeof(*ip6info));
+         src6->sin6_port = ntohs(udp_info->source);
+         dst6->sin6_port = ntohs(udp_info->dest);
       } else {
          INFO("Non tcp/ipv6 traffic: %d, id=%u", ip6info->ip6_nxt, event_id);
          ret = -1;
          goto exit;
       }
+      memcpy(src6->sin6_addr.s6_addr,
+             ip6info->ip6_src.s6_addr,
+             16);
+      memcpy(dst6->sin6_addr.s6_addr,
+             ip6info->ip6_dst.s6_addr,
+             16);
+
+      conn_data->protocol = ip6info->ip6_nxt;
    }
 
    event_type = get_event_type(nfa);
 
    /* Don't add packet depicting invalid tcp state  to the thread pool queue */
-   if (!tcp_info->syn) {
-      INFO("Invalid tcp packet, ignoring packet: id=%u", event_id);
-      ret = -1;
-      goto exit;
+   if (tcp_info) {
+      if ((!tcp_info->syn) || (tcp_info->ack)) {
+         DEBUG("Invalid tcp packet, ignoring packet: id=%u", event_id);
+         ret = -1;
+         goto exit;
+      }
    }
 
    /* Don't add packet received on invalid hook to the thread pool queue */
@@ -780,11 +999,14 @@ vmw_net_queue_callback(struct nfq_q_handle *qh,
       goto exit;
    }
 
+   /* Mark the packet with our mark */
+   packet_mark = update_packet_mark(nfa);
+
    conn_data->event_type = event_type;
    conn_data->event_id = event_id;
 
    /* Deliver packet to client */
-   ret = vmw_client_notify(conn_data, sess);
+   ret = vmw_client_notify(conn_data, sess, packet_mark);
    if (ret <= 0) {
       goto exit;
    }
@@ -793,6 +1015,7 @@ vmw_net_queue_callback(struct nfq_q_handle *qh,
           event_type, event_id);
 
 exit:
+   /* If there are no clients connected ret = 0 */
    if (ret <= 0 && sess) {
       /*
        * Re-inject the packet by providing NF_REPEAT verdict with mask bit set
@@ -802,7 +1025,7 @@ exit:
       nfq_set_verdict2(sess->queue_ctx.qhandle,
                       event_id,
                       NF_REPEAT,
-                      VMW_NFQ_PKT_MARK,
+                      packet_mark,
                       0,
                       NULL);
    }

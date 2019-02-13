@@ -18,51 +18,72 @@
 #
 # SPDX-License-Identifier: GPL-2.0-only
 #
+
+MKFILE := $(word $(words $(MAKEFILE_LIST)),$(MAKEFILE_LIST))
+SRCDIR := $(dir $(abspath $(MKFILE)))
+SRCROOT := $(SRCDIR:%/=%)
+
 default: vmw_conn_oss
 
 all: vmw_conn_oss install
 
-INCLUDES=-I./include/ -I/usr/include
-
 ifndef LIB_NETFILTER_INCLUDE
-LIB_NETFILTER_INCLUDE=-I/usr/src/debug/libnetfilter_conntrack-1.0.6/include/
+LIB_NETFILTER_INCLUDE := -I/usr/src/debug/libnetfilter_conntrack-1.0.6/include
 endif
 
-GLIB_INCLUDES=-I/usr/include/glib-2.0 -I/usr/lib64/glib-2.0/include/ $(LIB_NETFILTER_INCLUDE) 
-CFLAGS=$(INCLUDES) $(GLIB_INCLUDES)
-VMW_OPEN_LIBNETFLT_OBJS=-L/usr/lib64/,/usr/lib/x86_64-linux-gnu/lib, \
-								 -lmnl -lnfnetlink -lpthread\
-								 -lnetfilter_queue -lnetfilter_conntrack -lglib-2.0
+CC := gcc
+
+GLIB_INCLUDES := -I/usr/include/glib-2.0 -I/usr/lib64/glib-2.0/include
+
+INCLUDES := \
+	-I./include/ \
+	-I/usr/include \
+	-I/usr/lib/x86_64-linux-gnu/glib-2.0/include \
+	$(GLIB_INCLUDES) \
+	$(LIB_NETFILTER_INCLUDE)
+
+CFLAGS := -Wall -Wextra -Werror -Wno-unused-parameter -g $(INCLUDES)
+
+LDFLAGS := \
+	-L/usr/lib64/ \
+	-L/usr/lib/x86_64-linux-gnu/lib \
+	-lpthread \
+	-lglib-2.0 \
+	-lmnl \
+	-lnfnetlink \
+	-lnetfilter_queue \
+	-lnetfilter_conntrack
+
+VMW_OPEN_SOURCE_BIN := $(SRCROOT)/vmw_conn_notify
+
+VMW_INSTALL_CONFDIR := /etc/vmw_conn_notify
+VMW_INSTALL_INITDIR := /etc/init.d
 
 ###############################
 # vmw_conn_notify open source
 ###############################
-NET_OPEN_SOURCE =\
-		   ./vmw_conn_main.c \
-		   ./vmw_conn_netfilter.c
+VMW_OPEN_SOURCE_SRCS := \
+	$(SRCROOT)/vmw_conn_main.c \
+	$(SRCROOT)/vmw_conn_netfilter.c
 
+VMW_OPEN_SOURCE_OBJS := \
+	$(SRCROOT)/vmw_conn_main.o \
+	$(SRCROOT)/vmw_conn_netfilter.o
 
-VMW_OPEN_SOURCE_OBJS=\
-		      ./vmw_conn_main.o \
-		      ./vmw_conn_netfilter.o
+$(VMW_OPEN_SOURCE_OBJS): %.o: %.c
+	$(CC) $(CFLAGS) -c -o $@ $<
 
-vmw_conn_oss:   $(VMW_OPEN_SOURCE_OBJS)
-	$(CC) $(CC_DEBUG_OPTS) $(CC_WARNINGS) $(CC_OPTS) $(INCLUDES) \
-	$(GLIB_INCLUDES) -o \
-	./vmw_conn_notify \
-	$(VMW_OPEN_SOURCE_OBJS) \
-	$(LDFLAGS) \
-	$(VMW_OPEN_LIBNETFLT_OBJS) \
-	$(CC_LIB_PATHS) \
+vmw_conn_oss: $(VMW_OPEN_SOURCE_OBJS)
+	$(CC) -o $(VMW_OPEN_SOURCE_BIN) $(VMW_OPEN_SOURCE_OBJS) $(LDFLAGS)
 
 install:
-	mkdir -p /etc/vmw_conn_notify
-	cp ./vmw_conn_notify.conf /etc/vmw_conn_notify/
-	cp ./vmw_conn_notifyd /etc/init.d/
-	chmod 755 /etc/init.d/vmw_conn_notifyd
-	cp ./vmw_conn_notify /usr/sbin/
+	mkdir -p $(VMW_INSTALL_CONFDIR)
+	cp $(SRCROOT)/vmw_conn_notify.conf $(VMW_INSTALL_CONFDIR)
+	cp $(SRCROOT)/vmw_conn_notifyd $(VMW_INSTALL_INITDIR)
+	chmod 755 $(VMW_INSTALL_INITDIR)/vmw_conn_notifyd
+	cp $(VMW_OPEN_SOURCE_BIN) /usr/sbin/
 	chmod 755 /usr/sbin/vmw_conn_notify
 
 clean:
-	rm *.o
-	rm vmw_conn_notify 
+	rm -f $(VMW_OPEN_SOURCE_OBJS)
+	rm -f $(VMW_OPEN_SOURCE_BIN)
