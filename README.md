@@ -17,6 +17,7 @@ Guest Introspection for VMware NSX requires libnetfilter_queue, libnetfilter_con
 ### Availabiltiy
 Guest Introspection for VMware NSX is available on the following Linux distributions and versions:
  * Ubuntu 14.04 LTS 64-bit
+ * Ubuntu 16.04 LTS 64-bit
  * RHEL 7 64-bit 
  * SLES 12 SP2 64-bit
  * CentOS 7 64 bit

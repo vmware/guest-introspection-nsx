@@ -41,6 +41,8 @@ VMW_CONN_NOTIFY_BIN=/usr/sbin/$VMW_CONN_NOTIFY_NAME
 VMW_CONN_NOTIFY_CONFIG=/etc/vmw_conn_notify/vmw_conn_notify.cfg
 LOCK_FILE=/var/lock/subsys/vmw_conn_notifyd
 VMW_CONN_NOTIFY_STOP_TIME=2
+VMW_CONN_NOTIFY_WATCHDOG_NAME=vmw_conn_notifyd_watchdog
+VMW_CONN_NOTIFY_WATCHDOG=/usr/sbin/$VMW_CONN_NOTIFY_WATCHDOG_NAME
 
 # GM_STATUS related variables
 GM_SUCCESS=0
@@ -267,6 +269,21 @@ if [ "`id -u`" -ne 0 ] ; then
    exit 4
 fi
 
+#####################################################################
+# Starts the watchdog service
+#####################################################################
+start_watchdog() {
+   local retval="$GM_SUCCESS"
+
+   # setsid creates a new session id for watchdog and
+   # keeps it running even if shell session is closed
+   # Watchdog is redundant when there is systemd service
+   # But necessary when there is upstart or SysVinit
+   setsid $VMW_CONN_NOTIFY_WATCHDOG >/dev/null 2>&1 < /dev/null &
+   retval=$?
+   return "$retval"
+}
+
 status_vmw_conn_notify() {
 
    # Check if there's already running instance of vmw_conn_notify, using lock_file
@@ -285,10 +302,27 @@ status_vmw_conn_notify() {
 }
 
 #####################################################################
+# Queries the watchdog service
+#####################################################################
+status_watchdog() {
+   local retval="$GM_SUCCESS"
+   local pids=$(pgrep -f $VMW_CONN_NOTIFY_WATCHDOG_NAME)
+
+   if [ -n "$pids" ]; then
+      retval="$GM_SUCCESS"
+   else
+      retval="$GM_FAIL"
+   fi
+   return "$retval"
+}
+
+#####################################################################
 # Arguments:
 # Argument 1: LOG_LEVEL(SILENT(0) / VERBOSE(1))
+# Argument 2: NO_WATCHDOG (optional)
 #####################################################################
 start () {
+   local retval_watchdog="$GM_SUCCESS"
    local retval_vmw_conn_notify="$GM_SUCCESS"
    local retval="$GM_SUCCESS"
    local VERBOSE=1
@@ -316,7 +350,31 @@ start () {
       add_vnetchain_filter_rules
    fi
 
-   retval=${retval_vmw_conn_notify}
+   status_watchdog
+   retval_watchdog=$?
+   if [ "$retval_watchdog" -ne "$GM_SUCCESS" ]; then
+      vmw_logger "Starting watchdog for $VMW_CONN_NOTIFY_NAME" $SILENT $INFO
+      start_watchdog
+      status_watchdog
+      retval_watchdog=$?
+   fi
+
+   if [ "$retval_watchdog" -ne "$GM_SUCCESS" ]; then
+      sleep 1
+      status_watchdog
+      retval_watchdog=$?
+   fi
+
+   # Display results for watchdog
+   if [ "$retval_watchdog" -ne "$GM_SUCCESS" ]; then
+      retval_watchdog="$GM_FAIL"
+      vmw_logger "Unable to start $VMW_CONN_NOTIFY_WATCHDOG_NAME" $SILENT $ERROR
+   else
+      retval_watchdog="$GM_SUCCESS"
+      vmw_logger "$VMW_CONN_NOTIFY_WATCHDOG_NAME started successfully" $SILENT $SUCCESS
+   fi
+
+   retval=$((retval_vmw_conn_notify || retval_watchdog))
    if [ "$retval" -eq "$GM_SUCCESS" ]; then
      vmw_logger "$VMW_CONN_NOTIFY_NAME service is running" $LOG_LEVEL $SUCCESS
    else
@@ -334,8 +392,10 @@ start () {
 #####################################################################
 # Arguments:
 # Argument 1: LOG_LEVEL(SILENT(0) / VERBOSE(1))
+# Argument 2: NO_WATCHDOG (optional)
 #####################################################################
 stop() {
+   local retval_watchdog="$GM_SUCCESS"
    local retval_vmw_conn_notify="$GM_SUCCESS"
    local retval="$GM_SUCCESS"
    local VERBOSE=1
@@ -343,6 +403,22 @@ stop() {
    local LOG_LEVEL=${1:-$VERBOSE}
 
    vmw_logger "Stopping $VMW_CONN_NOTIFY_NAME service" $SILENT $INFO
+
+   status_watchdog
+   retval_watchdog=$?
+   if [ "$retval_watchdog" -eq "$GM_SUCCESS" ]; then
+      vmw_logger "Stopping $VMW_CONN_NOTIFY_WATCHDOG_NAME for vmw_conn_notify" $SILENT $SUCCESS
+      kill -SIGKILL `pgrep -f $VMW_CONN_NOTIFY_WATCHDOG_NAME` >/dev/null 2>&1
+      status_watchdog
+      retval_watchdog=$?
+   fi
+   if [ "$retval_watchdog" -ne "$GM_SUCCESS" ]; then
+      retval_watchdog="$GM_SUCCESS"
+      vmw_logger "$VMW_CONN_NOTIFY_WATCHDOG_NAME stopped successfully" $SILENT $SUCCESS
+   else
+      retval_watchdog="$GM_FAIL"
+      vmw_logger "Failed to stop $VMW_CONN_NOTIFY_WATCHDOG_NAME" $SILENT $ERROR
+   fi
 
    status_vmw_conn_notify
    retval_vmw_conn_notify=$?
@@ -363,7 +439,7 @@ stop() {
       vmw_logger "Failed to stop $VMW_CONN_NOTIFY_NAME binary" $SILENT $ERROR
    fi
 
-   retval=${retval_vmw_conn_notify}
+   retval=$((retval_vmw_conn_notify || retval_watchdog))
    if [ "$retval" -eq "$GM_SUCCESS" ]; then
      vmw_logger "$VMW_CONN_NOTIFY_NAME service is stopped" $LOG_LEVEL $SUCCESS
    else
@@ -380,13 +456,16 @@ stop() {
 #####################################################################
 # Arguments:
 # Argument 1: LOG_LEVEL(SILENT(0) / VERBOSE(1))
+# Argument 2: NO_WATCHDOG (optional)
 #####################################################################
 status() {
    local retval_vmw_conn_notify="$GM_SUCCESS"
+   local retval_watchdog="$GM_SUCCESS"
    local retval="$GM_SUCCESS"
    local VERBOSE=1
    local SILENT=0
    local LOG_LEVEL=${1:-$VERBOSE}
+   local NO_WATCHDOG=${2:-0}
 
    status_vmw_conn_notify
    retval_vmw_conn_notify=$?
@@ -398,7 +477,19 @@ status() {
       vmw_logger "$VMW_CONN_NOTIFY_NAME binary is running" $SILENT $INFO
    fi
 
-   retval=${retval_vmw_conn_notify}
+   if [ "${NO_WATCHDOG}" -eq 0 ]; then
+      status_watchdog
+      retval_watchdog=$?
+      if [ "$retval_watchdog" -ne "$GM_SUCCESS" ]; then
+         retval_watchdog="$GM_FAIL"
+         vmw_logger "$VMW_CONN_NOTIFY_WATCHDOG_NAME is stopped" $SILENT $INFO
+      else
+         retval_watchdog="$GM_SUCCESS"
+         vmw_logger "$VMW_CONN_NOTIFY_WATCHDOG_NAME is running" $SILENT $INFO
+      fi
+   fi
+
+   retval=$((retval_vmw_conn_notify || retval_watchdog))
    if [ "$retval" -eq "$GM_SUCCESS" ]; then
       vmw_logger "$VMW_CONN_NOTIFY_NAME service is running" $LOG_LEVEL $INFO
    else
