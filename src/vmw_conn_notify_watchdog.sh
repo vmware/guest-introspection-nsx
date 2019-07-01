@@ -131,7 +131,7 @@ start() {
    local iter_vmw_conn_notify=0
 
    while :
-      do
+   do
       # Sleep so we don't continuously spawn the process(s)
       sleep $IMMORTAL
       # Status returns the combined status and can pinpoint which service is stopped
