@@ -11,14 +11,21 @@ Guest Introspection for VMware NSX provides following features:
   * Network connection monitoring (TCP and UDP)
  
 ### Dependencies 
-Guest Introspection for VMware NSX requires libnetfilter_queue, libnetfilter_conntrack and netfilter kernel modules and libglib-2.0.
+Guest Introspection for VMware NSX requires following libraries:
+ * libnetfilter_queue
+ * libnetfilter_conntrack
+ * netfilter kernel modules
+ * libglib-2.0
+ * libmnl
 
 
 ### Availabiltiy
 Guest Introspection for VMware NSX is available on the following Linux distributions and versions:
  * Ubuntu 14.04 LTS 64-bit
+ * Ubuntu 16.04 LTS 64-bit
  * RHEL 7 64-bit 
  * SLES 12 SP2 64-bit
+ * CentOS 7 64 bit
 
 ### Build & Run
 
@@ -36,7 +43,7 @@ To change  syslog logging level of this daemon, please update DEBUG_LEVEL in /et
 
 The guest-introspection-nsx project team welcomes contributions from the community. If you wish to contribute code and you have not
 signed our contributor license agreement (CLA), our bot will update the issue when you open a Pull Request. For any
-questions about the CLA process, please refer to our [FAQ](https://cla.vmware.com/faq). 
+questions about the contributor license agreement (CLA) process, please refer to our [FAQ](https://cla.vmware.com/faq). 
 
 ## How can I get involved today?
 
@@ -55,7 +62,7 @@ Yes. Initially, VMware engineers will be the only committers. As we roll out our
 
 ## How can I submit code changes like bug fixes, patches, new features to the project?
 
-Initially, you can submit bug fixes, patches and new features to the project development mailing list as attachments to emails or bug reports. To contribute source code, you will need to fill out a contribution agreement form as part of the submission process. We will have more details on this process shortly.
+Initially, you can submit bug fixes, patches and new features to the project development mailing list as attachments to e-mails or bug reports. To contribute source code, you will need to fill out a contribution agreement form as part of the submission process. We will have more details on this process shortly.
 
 
 # License
