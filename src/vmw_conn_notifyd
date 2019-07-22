@@ -277,7 +277,7 @@ start_watchdog() {
 
    # setsid creates a new session id for watchdog and
    # keeps it running even if shell session is closed
-   # Watchdog is redundant when there is no systemd
+   # Watchdog is redundant when there is systemd service
    # But necessary when there is upstart or SysVinit
    setsid $VMW_CONN_NOTIFY_WATCHDOG >/dev/null 2>&1 < /dev/null &
    retval=$?
