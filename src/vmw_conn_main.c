@@ -481,9 +481,6 @@ vmw_string_trim(const char *str, int delim)
 }
 
 /*
- * First do the handshake with the connected client exchange version
- * and get the protocol from client.
-=======
  * Pack the version into 32 bit integer keeping one byte for each field.
  * Client may simply perform the integer comparison
  * for example 0x1002 >= 0x1001
@@ -504,7 +501,6 @@ vmw_pack_version()
 /*
  * First do the handshake with the connected client.
  * Exchange version and get the protocol from client.
->>>>>>> master
  */
 static int
 vmw_handshake_version(int new_socket, struct vmw_client_scope *client_ctx)
