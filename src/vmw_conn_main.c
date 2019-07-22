@@ -449,38 +449,6 @@ exit:
 
 
 /*
-<<<<<<< HEAD
- * Trim the given string with the given delimiter. Allocates memory for
- * New string.
- * Returns - A trimmed string on success or NULL on failure
- */
-char*
-vmw_string_trim(const char *str, int delim)
-{
-   char *nstr = NULL;
-   char *tmp = NULL;
-
-   /* sanity check */
-   if (!str) {
-      return NULL;
-   }
-
-   /* allocate memory and store base pointer */
-   tmp = nstr = strdup(str);
-
-   /* trim the string with given delimiter */
-   while (*str) {
-      if (*str != delim) {
-         *nstr++ = *str;
-      }
-      str++;
-   }
-
-   *nstr = '\0';
-   return tmp;
-}
-
-/*
  * Pack the version into 32 bit integer keeping one byte for each field.
  * Client may simply perform the integer comparison
  * for example 0x1002 >= 0x1001
