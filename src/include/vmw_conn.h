@@ -68,7 +68,12 @@
 #define DEBUG(fmt, ...) LOG_MSG(LOG_DEBUG, "DEBUG", fmt, ##__VA_ARGS__)
 #define NOTICE(fmt, ...) LOG_MSG(LOG_NOTICE, "NOTICE", fmt, ##__VA_ARGS__)
 
-#define PROG_NAME "vmw_conn_notfiy"
+#define VERSION_MAJOR 1
+#define VERSION_MINOR 1
+#define VERSION_BUILD 0
+#define VERSION_REVISION 0
+
+#define PROG_NAME "vmw_conn_notify"
 
 /* Maximum number of supported client */
 #define MAX_CLIENTS 2
@@ -78,8 +83,11 @@
  * interested in. These macros indicate how the bits in the 'protocol'
  * field of vmw_client_info are interpreted.
  */
-#define TCP_SUPPORT 1<<0
-#define UDP_SUPPORT 1<<1
+#define TCP_OUT_PRE_CONN_SUPPORT 1<<0
+#define TCP_IN_PRE_CONN_SUPPORT  1<<1
+#define TCP_EST_CONN_SUPPORT     1<<2
+#define TCP_CLOSE_CONN_SUPPORT   1<<3
+#define UDP_SUPPORT              1<<4
 
 /* Network event Type */
 enum vmw_conn_event_type {
@@ -90,10 +98,11 @@ enum vmw_conn_event_type {
    MAX_EVENT,
 };
 
-struct vmw_dns_payload{
-   uint8_t len;
-   char *payload;
-};
+/* DNS payload data */
+struct vmw_dns_payload {
+   uint16_t len;                          /* Length of DNS payload */
+   char *payload;                         /* DNS payload */
+}
 
 /* Network connection identification related data */
 struct vmw_conn_identity_data {
@@ -102,7 +111,7 @@ struct vmw_conn_identity_data {
    enum vmw_conn_event_type event_type;   /* Network connection type */
    uint32_t event_id;                     /* Event id */
    uint8_t protocol;                      /* L3 protocol */
-   struct vmw_dns_payload dns_payload[1];
+   struct vmw_dns_payload dns_payload[1]; /* DNS payload */
 };
 
 struct vmw_client_scope {
