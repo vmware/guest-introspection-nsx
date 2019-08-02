@@ -45,6 +45,10 @@
 #include <libnetfilter_conntrack/libnetfilter_conntrack.h>
 #include <libnetfilter_conntrack/libnetfilter_conntrack_tcp.h>
 
+#ifndef DNS_PORT
+#define DNS_PORT (53)
+#endif
+
 /* Maximum queue length to handle connection burst */
 #define VNET_NFQLENGTH 65536
 
@@ -96,6 +100,11 @@ struct vmw_net_session *vmw_net_sess_handle;
  * hashtable
  */
 pthread_mutex_t global_pkthash_lock  = PTHREAD_MUTEX_INITIALIZER;
+
+/*
+ * Lock used to send the payload and message header to client over UDS
+ */
+pthread_mutex_t clientUDSLock;
 
 /*
  * Global variable indicates completion of all necessary
@@ -477,6 +486,7 @@ vmw_conn_data_send(struct vmw_conn_identity_data *conn_data,
                    uint32_t packet_mark)
 {
    global_packet_info *global_packet = NULL;
+   char *buf = NULL;
    int i, sd;
    int ret = 0, refcnt = 0;
 
@@ -539,7 +549,29 @@ vmw_conn_data_send(struct vmw_conn_identity_data *conn_data,
       }
       pthread_mutex_unlock(&g_client_ctx[i].client_sock_lock);
 
-      ret = send(sd, conn_data, sizeof(*conn_data), 0);
+      if (conn_data->dns_payload->payload != NULL) {
+         buf = (char *) malloc(sizeof(*conn_data) +
+                               conn_data->dns_payload->len);
+         if (NULL == buf) {
+            ERROR("Failed to allocate memory for DNS payload buf");
+            ret = -1;
+            goto exit;
+         }
+         memset(buf, 0, sizeof(*conn_data) + conn_data->dns_payload->len);
+         memcpy(buf, conn_data,sizeof(*conn_data));
+         memcpy(buf + sizeof(*conn_data), conn_data->dns_payload->payload,
+                conn_data->dns_payload->len);
+         pthread_mutex_lock(&clientUDSLock);
+         ret = send(sd, buf, sizeof(*conn_data) + conn_data->dns_payload->len,
+                    0);
+         pthread_mutex_unlock(&clientUDSLock);
+         free(buf);
+      } else {
+         pthread_mutex_lock(&clientUDSLock);
+         ret = send(sd, conn_data, sizeof(*conn_data), 0);
+         pthread_mutex_unlock(&clientUDSLock);
+      }
+
       if (ret <= 0) {
          ERROR("Could not send event %u to client %d (error %s)",
                conn_data->event_id, sd, strerror(errno));
@@ -889,6 +921,7 @@ vmw_net_queue_callback(struct nfq_q_handle *qh,
    unsigned char *data = NULL;
    uint32_t event_id;
    uint32_t packet_mark;
+   uint32_t hdrLen = 0;
 
    sess = vmw_net_sess_handle;
    if (!nfa|| !sess) {
@@ -942,6 +975,9 @@ vmw_net_queue_callback(struct nfq_q_handle *qh,
          udp_info = (struct udphdr *)(data + sizeof(*ipinfo));
          src->sin_port = ntohs(udp_info->source);
          dst->sin_port = ntohs(udp_info->dest);
+         if (DNS_PORT == src->sin_port) {
+            hdrLen = ntohs(udp_info->len);
+         }
       } else {
          INFO("Non tcp/ip traffic: %d, id=%u", ipinfo->protocol, event_id);
          ret = -1;
@@ -966,6 +1002,9 @@ vmw_net_queue_callback(struct nfq_q_handle *qh,
          udp_info = (struct udphdr *)(data + sizeof(*ip6info));
          src6->sin6_port = ntohs(udp_info->source);
          dst6->sin6_port = ntohs(udp_info->dest);
+         if (DNS_PORT == src->sin_port) {
+            hdrLen = ntohs(udp_info->len);
+         }
       } else {
          INFO("Non tcp/ipv6 traffic: %d, id=%u", ip6info->ip6_nxt, event_id);
          ret = -1;
@@ -1005,6 +1044,15 @@ vmw_net_queue_callback(struct nfq_q_handle *qh,
    conn_data->event_type = event_type;
    conn_data->event_id = event_id;
 
+   if ((event_type == INBOUND_PRECONNECT) && (hdrLen != 0)) {
+      conn_data->dns_payload->len = hdrLen - sizeof(struct udphdr);
+      conn_data->dns_payload->payload = malloc(conn_data.dns_payload->len);
+      if (NULL != conn_data->dns_payload->payload) {
+         memcpy(conn_data->dns_payload->payload,
+                (void*)((unsigned long)udp_info + sizeof(struct udphdr)),
+                conn_data.dns_payload->len);
+      }
+   }
    /* Deliver packet to client */
    ret = vmw_client_notify(conn_data, sess, packet_mark);
    if (ret <= 0) {
@@ -1015,6 +1063,11 @@ vmw_net_queue_callback(struct nfq_q_handle *qh,
           event_type, event_id);
 
 exit:
+   if (conn_data->dns_payload->payload != NULL) {
+      free(conn_data->dns_payload->payload);
+      conn_data->dns_payload->payload = NULL;
+   }
+
    /* If there are no clients connected ret = 0 */
    if (ret <= 0 && sess) {
       /*
@@ -1177,6 +1230,7 @@ vmw_init(void *arg)
    ATOMIC_OR(&g_vmw_init_done, 1);
    INFO("%s is running", PROG_NAME);
 
+   pthread_mutex_init(&clientUDSLock, NULL);
    ret = pthread_create(&client_msg_recv_thread,
                         NULL,
                         vmw_client_msg_recv,
@@ -1203,6 +1257,7 @@ vmw_init(void *arg)
 
 exit:
    vmw_net_cleanup(vmw_net_sess_handle);
+   pthread_mutex_destroy(&clientUDSLock);
 
    /* Free struct vmw_net_session */
    if (vmw_net_sess_handle) {
