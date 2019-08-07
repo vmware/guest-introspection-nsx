@@ -69,7 +69,7 @@
 #define NOTICE(fmt, ...) LOG_MSG(LOG_NOTICE, "NOTICE", fmt, ##__VA_ARGS__)
 
 #define VERSION_MAJOR 1
-#define VERSION_MINOR 1
+#define VERSION_MINOR 2
 #define VERSION_BUILD 0
 #define VERSION_REVISION 0
 
@@ -102,7 +102,7 @@ enum vmw_conn_event_type {
 struct vmw_dns_payload {
    uint16_t len;                          /* Length of DNS payload */
    char *payload;                         /* DNS payload */
-}
+};
 
 /* Network connection identification related data */
 struct vmw_conn_identity_data {

@@ -743,7 +743,7 @@ vmw_net_conntrack_callback(enum nf_conntrack_msg_type type,
    }
 
    conn_data = (struct vmw_conn_identity_data *)
-           malloc(sizeof(struct vmw_conn_identity_data));
+           calloc(1, sizeof(struct vmw_conn_identity_data));
    if (!conn_data) {
       ERROR("Memory allocation failed for msg data");
       goto exit;
@@ -930,7 +930,7 @@ vmw_net_queue_callback(struct nfq_q_handle *qh,
    }
 
    conn_data = (struct vmw_conn_identity_data *)
-           malloc(sizeof(struct vmw_conn_identity_data));
+           calloc(1, sizeof(struct vmw_conn_identity_data));
    if (!conn_data) {
       ERROR("Memory allocation failed for msg data");
       ret = -1;
@@ -1002,7 +1002,7 @@ vmw_net_queue_callback(struct nfq_q_handle *qh,
          udp_info = (struct udphdr *)(data + sizeof(*ip6info));
          src6->sin6_port = ntohs(udp_info->source);
          dst6->sin6_port = ntohs(udp_info->dest);
-         if (DNS_PORT == src->sin_port) {
+         if (DNS_PORT == src6->sin6_port) {
             hdrLen = ntohs(udp_info->len);
          }
       } else {
@@ -1046,11 +1046,11 @@ vmw_net_queue_callback(struct nfq_q_handle *qh,
 
    if ((event_type == INBOUND_PRECONNECT) && (hdrLen != 0)) {
       conn_data->dns_payload->len = hdrLen - sizeof(struct udphdr);
-      conn_data->dns_payload->payload = malloc(conn_data.dns_payload->len);
+      conn_data->dns_payload->payload = malloc(conn_data->dns_payload->len);
       if (NULL != conn_data->dns_payload->payload) {
          memcpy(conn_data->dns_payload->payload,
                 (void*)((unsigned long)udp_info + sizeof(struct udphdr)),
-                conn_data.dns_payload->len);
+                conn_data->dns_payload->len);
       }
    }
    /* Deliver packet to client */
