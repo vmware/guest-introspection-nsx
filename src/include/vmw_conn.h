@@ -98,6 +98,12 @@ enum vmw_conn_event_type {
    MAX_EVENT,
 };
 
+/* DNS payload data */
+struct vmw_dns_payload {
+   uint16_t len;                          /* Length of DNS payload */
+   char *payload;                         /* DNS payload */
+};
+
 /* Network connection identification related data */
 struct vmw_conn_identity_data {
    struct sockaddr_storage src;           /* Source ip */
@@ -105,6 +111,7 @@ struct vmw_conn_identity_data {
    enum vmw_conn_event_type event_type;   /* Network connection type */
    uint32_t event_id;                     /* Event id */
    uint8_t protocol;                      /* L3 protocol */
+   struct vmw_dns_payload dns_payload[1]; /* DNS payload */
 };
 
 struct vmw_client_scope {
