@@ -59,6 +59,7 @@ INFO="info"
 
 NFQUEUE_BYPASS="NFQUEUE --queue-num 0 --queue-bypass"
 TCP_PACKET_FILTER_OP="-p tcp --tcp-flags FIN,SYN,RST,ACK,PSH SYN"
+CONNTRACK_RULE="-m conntrack --ctstate RELATED,ESTABLISHED"
 VNET_PACKET_STAMP="-m mark ! --mark 0x1/0x1"
 VNET_CHAIN=vnetchain
 
@@ -228,6 +229,7 @@ add_vnetchain_filter_rules() {
    exec_or_die "${IPTABLES} -I OUTPUT ${VNET_PACKET_STAMP} \
                 ${TCP_PACKET_FILTER_OP} -j ${VNET_CHAIN}"
    exec_or_die "${IPTABLES} -I ${VNET_CHAIN} -j ${NFQUEUE_BYPASS}"
+   exec_or_die "${IPTABLES} -A INPUT ${CONNTRACK_RULE} -j ACCEPT"
 
    #
    # Add ipv6 rules only when ipv6 is supported on the system
@@ -240,6 +242,7 @@ add_vnetchain_filter_rules() {
       exec_or_die "${IP6TABLES} -I OUTPUT ${VNET_PACKET_STAMP} \
                    ${TCP_PACKET_FILTER_OP} -j ${VNET_CHAIN}"
       exec_or_die "${IP6TABLES} -I ${VNET_CHAIN} -j ${NFQUEUE_BYPASS}"
+      exec_or_die "${IP6TABLES} -A INPUT ${CONNTRACK_RULE} -j ACCEPT"
    fi
 }
 
@@ -249,7 +252,7 @@ remove_vnetchain_filter_rules() {
    exec_or_warn "${IPTABLES} -D OUTPUT ${VNET_PACKET_STAMP} \
                  ${TCP_PACKET_FILTER_OP} -j ${VNET_CHAIN}"
    exec_or_warn "${IPTABLES} -D ${VNET_CHAIN} -j ${NFQUEUE_BYPASS}"
-
+   exec_or_warn "${IPTABLES} -D INPUT ${CONNTRACK_RULE} -j ACCEPT"
 
    exec_or_warn "${IPTABLES} -X ${VNET_CHAIN}"
 
@@ -261,6 +264,7 @@ remove_vnetchain_filter_rules() {
                     ${TCP_PACKET_FILTER_OP} -j ${VNET_CHAIN}"
       exec_or_warn "${IP6TABLES} -D ${VNET_CHAIN} -j ${NFQUEUE_BYPASS}"
       exec_or_warn "${IP6TABLES} -X ${VNET_CHAIN}"
+      exec_or_warn "${IP6TABLES} -D INPUT ${CONNTRACK_RULE} -j ACCEPT"
    fi
 }
 
