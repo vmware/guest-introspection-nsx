@@ -1,0 +1,13 @@
+[Unit]
+Description=VMware Network Connection Introspection Service
+Requires=network.target remote-fs.target rsyslog.service time-sync.target
+DefaultDependencies=no
+
+[Service]
+Type=forking
+ExecStart=/etc/vmw_conn_notify/vmw_conn_notifyd start
+ExecStop=/etc/vmw_conn_notify/vmw_conn_notifyd stop
+
+[Install]
+WantedBy=multi-user.target
+
