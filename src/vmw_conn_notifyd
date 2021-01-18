@@ -207,18 +207,40 @@ exec_or_warn() {
    fi
 }
 
-# Load netfilter kernel modules
-load_netfilter_modules() {
+# Load conntrack modules
+load_conntrack() {
    exec_or_die ${MODPROBE} iptable_filter
 
-   exec_or_die ${MODPROBE} xt_NFQUEUE
-   exec_or_die ${MODPROBE} nf_conntrack_ipv4
+   # Recent Linux kernel has deprecated nf_conntrack_ipv4 and ipv6 modules
+   # and single module nf_conntrack is required.
+   status="0"
+   cmd="modprobe -n nf_conntrack_ipv4"
+   out=$($cmd 2>&1) || status="$?"
+   if [ "$status" -ne 0 ]; then
+      exec_or_die ${MODPROBE} nf_conntrack
+   else
+      exec_or_die ${MODPROBE} nf_conntrack_ipv4
+   fi
 
    if test -f /proc/net/if_inet6
    then
       exec_or_die ${MODPROBE} ip6table_filter
-      exec_or_die ${MODPROBE} nf_conntrack_ipv6
+      status="0"
+      cmd="modprobe -n nf_conntrack_ipv6"
+      out=$($cmd 2>&1) || status="$?"
+      if [ "$status" -ne 0 ]; then
+         exec_or_die ${MODPROBE} nf_conntrack
+      else
+         exec_or_die ${MODPROBE} nf_conntrack_ipv6
+      fi
    fi
+
+}
+
+# Load netfilter kernel modules
+load_netfilter_modules() {
+   exec_or_die ${MODPROBE} xt_NFQUEUE
+   load_conntrack
 }
 
 add_vnetchain_filter_rules() {
