@@ -69,8 +69,8 @@
 #define NOTICE(fmt, ...) LOG_MSG(LOG_NOTICE, "NOTICE", fmt, ##__VA_ARGS__)
 
 #define VERSION_MAJOR 1
-#define VERSION_MINOR 1
-#define VERSION_BUILD 1
+#define VERSION_MINOR 2
+#define VERSION_BUILD 0
 #define VERSION_REVISION 0
 
 #define PROG_NAME "vmw_conn_notify"
