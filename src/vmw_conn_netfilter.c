@@ -810,7 +810,7 @@ int
 vmw_net_conntrack_init(void *arg)
 {
    struct nfct_handle *h;
-   struct nfct_filter *filter;
+   struct nfct_filter *filter = NULL;
    struct vmw_net_session *sess = (struct vmw_net_session *)arg;
    int flags, ret = 0;
 
@@ -919,8 +919,8 @@ vmw_net_queue_callback(struct nfq_q_handle *qh,
    int ret = -1;
    enum vmw_conn_event_type event_type = 0;
    unsigned char *data = NULL;
-   uint32_t event_id;
-   uint32_t packet_mark;
+   uint32_t event_id = UINT_MAX;
+   uint32_t packet_mark = 0;
    uint32_t hdrLen = 0;
 
    sess = vmw_net_sess_handle;
@@ -1063,7 +1063,8 @@ vmw_net_queue_callback(struct nfq_q_handle *qh,
           event_type, event_id);
 
 exit:
-   if (conn_data->dns_payload->payload != NULL) {
+   if (conn_data && conn_data->dns_payload &&
+      (conn_data->dns_payload->payload != NULL)) {
       free(conn_data->dns_payload->payload);
       conn_data->dns_payload->payload = NULL;
    }
