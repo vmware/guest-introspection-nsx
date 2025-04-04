@@ -162,19 +162,23 @@ fi
 
 # Determine OS type based on the functions library path
 OS=""
-if [ -f /etc/init.d/functions ] ; then
+MODPROBE_PARAM=""
+OS_NAME=$(head -n 1 /etc/os-release)
+MODPROBE_PARAM=""
+
+if [[ "$OS_NAME" == *"Red Hat Enterprise Linux"* ]] ; then
    OS="Redhat"
-   #. /etc/init.d/functions
-
-   MODPROBE_PARAM=""
-elif [ -f /lib/lsb/init-functions ] && [ -f /etc/rc.status ] ; then
+elif [[ "$OS_NAME" == *"CentOS"* ]] ; then
+   OS="CentOS"
+elif [[ "$OS_NAME" == *"SLES"* ]] ; then
    OS="Suse"
-
-   MODPROBE_PARAM="--allow-unsupported-modules"
-elif [ -f /lib/lsb/init-functions ] ; then
+MODPROBE_PARAM="--allow-unsupported-modules"
+elif [[ "$OS_NAME" == *"Ubuntu"* ]] ; then
    OS="Ubuntu"
-
-   MODPROBE_PARAM=""
+elif [[ "$OS_NAME" == *"Rocky Linux"* ]] ; then
+   OS="RockyLinux"
+elif [[ "$OS_NAME" == *"Debian"* ]] ; then
+   OS="Debian"
 else
    OS="Unsupported OS, exiting."
    vmw_logger $OS $SILENT $ERROR
