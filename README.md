@@ -22,7 +22,7 @@ Guest Introspection for VMware NSX requires following libraries:
 ### Availabiltiy
 Guest Introspection for VMware NSX is available on the following Linux distributions and versions:
  * Ubuntu 20.04, 22.04, 24.04 LTS 64-bit
- * RHEL 7, 8, 9 64-bit 
+ * RHEL 7, 8, 9 64-bit
  * SLES 12, 15 64-bit
  * CentOS 7, 8, 9 64 bit
  * Debian 10, 11, 12 64 bit
