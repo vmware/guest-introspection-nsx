@@ -182,6 +182,8 @@ elif [[ "$OS_NAME" == *"Rocky Linux"* ]] ; then
    OS="RockyLinux"
 elif [[ "$OS_NAME" == *"Debian"* ]] ; then
    OS="Debian"
+elif [[ "$OS_NAME" == *"Photon"* ]] ; then
+   OS="Photon"
 else
    OS="Unsupported OS, exiting."
    vmw_logger $OS $SILENT $ERROR
