@@ -173,9 +173,6 @@ elif [[ "$OS_NAME" == *"CentOS"* ]] ; then
 elif [[ "$OS_NAME" == *"SLES"* ]] ; then
    OS="Suse"
 MODPROBE_PARAM="--allow-unsupported-modules"
-elif [[ "$OS_NAME" == *"SLED"* ]] ; then
-   OS="Suse"
-MODPROBE_PARAM="--allow-unsupported-modules"
 elif [[ "$OS_NAME" == *"Ubuntu"* ]] ; then
    OS="Ubuntu"
 elif [[ "$OS_NAME" == *"Rocky Linux"* ]] ; then
