@@ -1184,13 +1184,14 @@ vmw_net_cleanup(struct vmw_net_session *sess)
       nfct_close(sess->conntrack_ctx.cthandle);
    }
 
-   /* Close netfilter queue library handle */
-   if (sess->queue_ctx.handle) {
-      nfq_close(sess->queue_ctx.handle);
-   }
    if (sess->queue_ctx.qhandle) {
       nfq_destroy_queue(sess->queue_ctx.qhandle);
       pthread_mutex_destroy(&sess->queue_lock);
+   }
+
+   /* Close netfilter queue library handle */
+   if (sess->queue_ctx.handle) {
+      nfq_close(sess->queue_ctx.handle);
    }
 
 exit:
